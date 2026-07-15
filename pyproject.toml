@@ -32,11 +32,18 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -m 'not integration'"
+markers = [
+    "integration: requires local RSNA data and is excluded from ordinary test runs",
+]
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.6.0",
     "pydicom-data>=1.0.0",
     "pytest>=9.1.1",
     "ruff>=0.15.21",
+]
+acquisition = [
+    "kaggle>=2.2.3",
 ]
