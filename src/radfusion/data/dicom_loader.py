@@ -34,9 +34,7 @@ def read_dicom(path: str | Path) -> tuple[np.ndarray, DicomRecord]:
         raise ValueError(f"Could not decode DICOM pixels: {dicom_path}") from exc
 
     if pixels.ndim != 2:
-        raise ValueError(
-            f"Expected a 2D image, received shape {pixels.shape} from {dicom_path}"
-        )
+        raise ValueError(f"Expected a 2D image, received shape {pixels.shape} from {dicom_path}")
 
     if getattr(dataset, "PhotometricInterpretation", None) == "MONOCHROME1":
         pixels = pixels.max() - pixels
@@ -57,9 +55,7 @@ def read_dicom(path: str | Path) -> tuple[np.ndarray, DicomRecord]:
         view_position=_optional_string(dataset, "ViewPosition"),
         rows=getattr(dataset, "Rows", None),
         columns=getattr(dataset, "Columns", None),
-        photometric_interpretation=_optional_string(
-            dataset, "PhotometricInterpretation"
-        ),
+        photometric_interpretation=_optional_string(dataset, "PhotometricInterpretation"),
     )
 
     return pixels, record

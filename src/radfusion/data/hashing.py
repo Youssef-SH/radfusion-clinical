@@ -1,0 +1,28 @@
+"""Deterministic hashing helpers for source and logical Arrow artifacts."""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.ipc as ipc
+
+_CHUNK_SIZE = 1024 * 1024
+
+
+def sha256_file(path: str | Path) -> str:
+    """Hash file bytes with SHA-256."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        while chunk := stream.read(_CHUNK_SIZE):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def arrow_ipc_sha256(table: pa.Table) -> str:
+    """Hash ordered Arrow IPC bytes, including schema, with SHA-256."""
+    sink = pa.BufferOutputStream()
+    with ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    return hashlib.sha256(sink.getvalue().to_pybytes()).hexdigest()
