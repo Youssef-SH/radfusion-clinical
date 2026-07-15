@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Environment
+.venv/
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# Data
+data/raw/**
+data/interim/**
+data/processed/**
+data/manifests/**
+!data/README.md
+!data/**/.gitkeep
+
+# Medical imaging
+*.dcm
+*.dicom
+*.dcm.gz
+
+# Data artifacts
+*.parquet
+*.feather
+*.npy
+*.npz
+*.pkl
+*.joblib
+
+# Models and experiment artifacts
+models/
+mlruns/
+mlartifacts/
+
+# Secrets
+kaggle.json
+credentials.json
+
+# Generated reports
+reports/*.html
