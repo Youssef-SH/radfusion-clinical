@@ -1,4 +1,4 @@
-"""Selected RSNA DICOM metadata extraction and aggregate audit accumulation."""
+"""Extract RSNA DICOM metadata and accumulate aggregate audit statistics."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ class DicomMetadata:
 
 @dataclass
 class AuditAccumulator:
-    """Aggregate-only counters; no patient-level values are serialized."""
+    """Accumulate audit counters without serializing patient-level values."""
 
     dicom_values: dict[str, Counter[str]]
     age_status: Counter[str]
@@ -80,6 +80,7 @@ class AuditAccumulator:
 
     @classmethod
     def empty(cls) -> AuditAccumulator:
+        """Return an empty audit accumulator."""
         return cls(
             dicom_values={},
             age_status=Counter(),
@@ -94,6 +95,7 @@ class AuditAccumulator:
         )
 
     def add(self, metadata: DicomMetadata) -> None:
+        """Add one DICOM metadata record to the aggregate audit."""
         for keyword, value in metadata.audit_values:
             counter = self.dicom_values.setdefault(keyword, Counter())
             counter[value if value is not None else "<missing>"] += 1
@@ -176,6 +178,7 @@ def read_dicom_metadata(path: Path) -> DicomMetadata:
 
 
 def validate_dicom_metadata(metadata: DicomMetadata, path: Path) -> None:
+    """Validate required DICOM metadata and supported categorical values."""
     if metadata.sex is not None and metadata.sex not in ALLOWED_SEX:
         raise ManifestBuildError(f"Unexpected PatientSex {metadata.sex!r} in {path}")
     if metadata.view_position is not None and metadata.view_position not in ALLOWED_VIEW_POSITIONS:
@@ -188,6 +191,7 @@ def validate_dicom_metadata(metadata: DicomMetadata, path: Path) -> None:
 
 
 def validate_spacing_pair(row_spacing: float | None, col_spacing: float | None) -> None:
+    """Validate an optional DICOM pixel-spacing pair."""
     if (row_spacing is None) != (col_spacing is None):
         raise ManifestBuildError("Pixel spacing must provide both row and column values")
     if row_spacing is None or col_spacing is None:

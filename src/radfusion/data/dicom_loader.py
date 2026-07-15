@@ -1,3 +1,5 @@
+"""Load and normalize DICOM images with selected metadata."""
+
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -9,6 +11,8 @@ from pydicom.dataset import FileDataset
 
 @dataclass(frozen=True)
 class DicomRecord:
+    """Selected metadata for a loaded DICOM image."""
+
     path: str
     patient_id: str | None
     patient_age: str | None
@@ -62,6 +66,7 @@ def read_dicom(path: str | Path) -> tuple[np.ndarray, DicomRecord]:
 
 
 def record_as_dict(record: DicomRecord) -> dict[str, Any]:
+    """Return a dictionary representation of a DICOM record."""
     return asdict(record)
 
 

@@ -1,10 +1,10 @@
 # RadFusion-Clinical
 
 RadFusion-Clinical investigates whether structured clinical information improves pneumonia
-prediction from chest radiographs. The repository currently implements deterministic ingestion of
-the RSNA Pneumonia Detection Challenge Stage 2 training set.
+prediction from chest radiographs. The repository implements deterministic ingestion of the RSNA
+Pneumonia Detection Challenge Stage 2 training set.
 
-> Research prototype. Not for clinical use.
+> Research prototype only. Not intended for clinical decision-making.
 
 ## Implemented capabilities
 
@@ -73,7 +73,7 @@ Do not commit DICOMs, patient-level manifests, credentials, or real patient exam
 - Leaves `split` null until a validated patient-level split policy is defined.
 - Treats the RSNA challenge target as a radiology-derived label, not confirmed clinical diagnosis.
 - Preserves and flags five source ages above 120 years.
-- Does not yet include training, evaluation, serving, or additional dataset adapters.
+- Currently focuses on deterministic RSNA ingestion. Training, evaluation, serving, and additional dataset adapters are introduced in later milestones.
 
 Architecture, artifact contracts, data handling, and rebuild guarantees are documented under
 [`docs/`](docs/).

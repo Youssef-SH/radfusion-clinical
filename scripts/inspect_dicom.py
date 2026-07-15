@@ -1,3 +1,5 @@
+"""Inspect a DICOM image and its selected metadata."""
+
 import sys
 from pathlib import Path
 
@@ -7,6 +9,7 @@ from radfusion.data.dicom_loader import read_dicom, record_as_dict
 
 
 def main() -> None:
+    """Load and display the DICOM image supplied on the command line."""
     if len(sys.argv) != 2:
         raise SystemExit("Usage: uv run python scripts/inspect_dicom.py IMAGE.dcm")
 

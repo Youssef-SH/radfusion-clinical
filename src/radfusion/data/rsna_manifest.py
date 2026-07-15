@@ -1,4 +1,4 @@
-"""Command-line entry point for the RSNA M1 artifact bundle."""
+"""Provide the command-line entry point for RSNA artifact bundle generation."""
 
 from __future__ import annotations
 

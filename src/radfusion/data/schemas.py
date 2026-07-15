@@ -1,4 +1,4 @@
-"""Arrow contracts for RadFusion sample and annotation artifacts."""
+"""Define Arrow contracts for RadFusion data artifacts."""
 
 from __future__ import annotations
 

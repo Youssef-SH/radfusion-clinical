@@ -1,4 +1,4 @@
-"""Deterministic hashing helpers for source and logical Arrow artifacts."""
+"""Hash source files and Arrow artifacts deterministically."""
 
 from __future__ import annotations
 

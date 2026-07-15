@@ -1,4 +1,4 @@
-"""DICOM patient-age parsing with explicit quality outcomes."""
+"""Parse DICOM patient ages and report data-quality outcomes."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ _DAYS_PER_YEAR = 365.2425
 
 @dataclass(frozen=True)
 class AgeParseResult:
-    """Normalized age plus the provenance and quality of the conversion."""
+    """Normalized age and its parsing outcome."""
 
     value_years: float | None
     status: str

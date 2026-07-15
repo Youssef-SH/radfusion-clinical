@@ -1,4 +1,4 @@
-"""Generate and publish immutable, validated RSNA artifact bundles."""
+"""Build and publish immutable RSNA artifact bundles."""
 
 from __future__ import annotations
 
@@ -265,6 +265,7 @@ def write_bundle(result: BuildResult, output_directory: str | Path) -> WriteResu
 
 
 def build_and_write(dataset_root: str | Path, output_directory: str | Path) -> WriteResult:
+    """Build RSNA artifacts and publish the resulting bundle."""
     return write_bundle(build_rsna_artifacts(dataset_root), output_directory)
 
 
@@ -466,7 +467,7 @@ def _build_aggregate_metadata(
                 "is not claimed"
             ),
             "artifact_files": "SHA-256 over generated Parquet bytes",
-            "dicom_files": "Individual DICOM files are not hashed in M1",
+            "dicom_files": "Individual DICOM files are not hashed",
         },
     }
 

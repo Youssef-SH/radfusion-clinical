@@ -1,4 +1,4 @@
-"""Cross-artifact validation for RSNA samples, task labels, and annotations."""
+"""Validate relationships across RSNA sample, label, and annotation artifacts."""
 
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ def validate_label_table(labels: pa.Table, samples: pa.Table) -> None:
         if sample_id not in sample_ids:
             raise ManifestBuildError(f"Label references unknown sample_id {sample_id!r}")
         if row["label_status"] != LABEL_STATUS_OBSERVED:
-            raise ManifestBuildError("RSNA M1 labels must have label_status='observed'")
+            raise ManifestBuildError("RSNA labels must have label_status='observed'")
         if task_id == PNEUMONIA_TASK_ID:
             _validate_label_provenance(
                 row,

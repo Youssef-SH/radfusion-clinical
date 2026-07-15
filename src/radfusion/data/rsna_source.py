@@ -1,4 +1,4 @@
-"""RSNA Stage 2 source-file parsing, identifier joins, and DICOM discovery."""
+"""Parse RSNA Stage 2 sources, join identifiers, and discover DICOM files."""
 
 from __future__ import annotations
 
@@ -19,12 +19,12 @@ RSNA_CLASS_VALUES = {
 
 
 class ManifestBuildError(ValueError):
-    """Raised when RSNA inputs or generated artifacts violate the M1 contract."""
+    """Raised when RSNA inputs or generated artifacts violate their contracts."""
 
 
 @dataclass(frozen=True)
 class RsnaPaths:
-    """Resolved input paths beneath an extracted RSNA dataset root."""
+    """Resolved inputs beneath an extracted RSNA dataset root."""
 
     root: Path
     labels: Path
@@ -61,7 +61,7 @@ class BoundingBox:
 
 @dataclass(frozen=True)
 class SourceSample:
-    """Validated label and class information for one RSNA source image."""
+    """Validated labels and annotations for one RSNA source image."""
 
     source_id: str
     target: int
@@ -161,10 +161,12 @@ def discover_dicoms(image_directory: Path) -> dict[str, Path]:
 
 
 def canonical_image_path(image_id: str) -> PurePosixPath:
+    """Return the canonical dataset-relative path for an RSNA image."""
     return PurePosixPath("stage_2_train_images", f"{image_id}.dcm")
 
 
 def resolve_image_path(root: Path, relative_path: PurePosixPath) -> Path:
+    """Resolve an image path while preventing traversal outside the dataset root."""
     resolved_root = root.resolve()
     resolved = (resolved_root / Path(*relative_path.parts)).resolve()
     if not resolved.is_relative_to(resolved_root):
@@ -175,6 +177,7 @@ def resolve_image_path(root: Path, relative_path: PurePosixPath) -> Path:
 def validate_identifier_sets(
     left: set[str], right: set[str], left_name: str, right_name: str
 ) -> None:
+    """Validate that two source identifier sets match exactly."""
     missing_right = sorted(left - right)
     missing_left = sorted(right - left)
     messages = []
@@ -193,6 +196,7 @@ def validate_identifier_sets(
 
 
 def validate_target_class(target: int, rsna_class: str, identifier: str) -> None:
+    """Validate compatibility between a pneumonia target and RSNA class."""
     compatible = (target == 1 and rsna_class == "Lung Opacity") or (
         target == 0 and rsna_class != "Lung Opacity"
     )
@@ -204,6 +208,7 @@ def validate_target_class(target: int, rsna_class: str, identifier: str) -> None
 
 
 def validate_box_values(box: BoundingBox, identifier: str) -> None:
+    """Validate bounding-box coordinates and extents."""
     values = (box.x, box.y, box.width, box.height)
     if not all(math.isfinite(value) for value in values):
         raise ManifestBuildError(f"Bounding box for {identifier!r} has non-finite coordinates")
@@ -212,6 +217,7 @@ def validate_box_values(box: BoundingBox, identifier: str) -> None:
 
 
 def validate_box_bounds(box: BoundingBox, dimensions: tuple[int, int], identifier: str) -> None:
+    """Validate that a bounding box lies within image bounds."""
     validate_box_values(box, identifier)
     rows, columns = dimensions
     if box.x + box.width > columns or box.y + box.height > rows:
