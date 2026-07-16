@@ -46,7 +46,7 @@ _DICOM_TAGS = (
 
 @dataclass(frozen=True)
 class DicomMetadata:
-    """Selected row-level and aggregate-only DICOM metadata."""
+    """DICOM metadata used for sample rows and aggregate audit."""
 
     patient_id: str
     age: AgeParseResult
@@ -65,7 +65,7 @@ class DicomMetadata:
 
 @dataclass
 class AuditAccumulator:
-    """Accumulate audit counters without serializing patient-level values."""
+    """Accumulate aggregate DICOM audit counters."""
 
     dicom_values: dict[str, Counter[str]]
     age_status: Counter[str]
@@ -121,7 +121,7 @@ class AuditAccumulator:
 
 
 def read_dicom_metadata(path: Path) -> DicomMetadata:
-    """Read selected header tags without decoding the DICOM pixel array."""
+    """Read selected DICOM header tags with pixel decoding disabled."""
     try:
         dataset = pydicom.dcmread(path, stop_before_pixels=True, specific_tags=list(_DICOM_TAGS))
     except (InvalidDicomError, OSError, EOFError, TypeError, ValueError) as exc:

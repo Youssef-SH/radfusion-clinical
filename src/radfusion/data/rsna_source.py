@@ -166,7 +166,7 @@ def canonical_image_path(image_id: str) -> PurePosixPath:
 
 
 def resolve_image_path(root: Path, relative_path: PurePosixPath) -> Path:
-    """Resolve an image path while preventing traversal outside the dataset root."""
+    """Resolve a dataset-relative image path within the dataset root."""
     resolved_root = root.resolve()
     resolved = (resolved_root / Path(*relative_path.parts)).resolve()
     if not resolved.is_relative_to(resolved_root):

@@ -38,7 +38,7 @@ ALLOWED_SPLITS = {"train", "validation", "test"}
 LABEL_STATUS_OBSERVED = "observed"
 
 
-def validate_sample_table(samples: pa.Table, dataset_root: str | Path) -> None:
+def validate_sample_table(samples: pa.Table, dataset_root: str | Path | None = None) -> None:
     """Validate the task-agnostic sample contract and deterministic paths."""
     _require_schema(samples, RSNA_SAMPLE_SCHEMA, "RSNA samples")
     rows = samples.to_pylist()
@@ -53,7 +53,7 @@ def validate_sample_table(samples: pa.Table, dataset_root: str | Path) -> None:
     if sample_ids != sorted(sample_ids):
         raise ManifestBuildError("RSNA samples must be ordered by sample_id")
 
-    root = Path(dataset_root).resolve()
+    root = Path(dataset_root).resolve() if dataset_root is not None else None
     for row in rows:
         if row["dataset_id"] != DATASET_ID:
             raise ManifestBuildError("dataset_id must be 'rsna'")
@@ -76,7 +76,7 @@ def validate_sample_table(samples: pa.Table, dataset_root: str | Path) -> None:
             raise ManifestBuildError(
                 f"RSNA image_path must match image_id; expected {expected_path.as_posix()!r}"
             )
-        if not resolve_image_path(root, relative_path).is_file():
+        if root is not None and not resolve_image_path(root, relative_path).is_file():
             raise ManifestBuildError(f"Sample image does not exist: {row['image_path']}")
 
 
@@ -152,7 +152,7 @@ def validate_annotation_table(
     annotations: pa.Table,
     samples: pa.Table,
     labels: pa.Table,
-    image_dimensions: Mapping[str, tuple[int, int]],
+    image_dimensions: Mapping[str, tuple[int, int]] | None = None,
 ) -> None:
     """Validate annotation relationships, geometry, identifiers, and ordering."""
     _require_schema(annotations, RSNA_ANNOTATION_SCHEMA, "RSNA annotations")
@@ -198,12 +198,15 @@ def validate_annotation_table(
         x, y, width, height = coordinates
         if x < 0 or y < 0 or width <= 0 or height <= 0:
             raise ManifestBuildError(f"Annotation {row['annotation_id']!r} has invalid geometry")
-        dimensions = image_dimensions.get(sample_id)
-        if dimensions is None:
-            raise ManifestBuildError(f"Missing image dimensions for sample {sample_id!r}")
-        image_rows, image_columns = dimensions
-        if x + width > image_columns or y + height > image_rows:
-            raise ManifestBuildError(f"Annotation {row['annotation_id']!r} exceeds image bounds")
+        if image_dimensions is not None:
+            dimensions = image_dimensions.get(sample_id)
+            if dimensions is None:
+                raise ManifestBuildError(f"Missing image dimensions for sample {sample_id!r}")
+            image_rows, image_columns = dimensions
+            if x + width > image_columns or y + height > image_rows:
+                raise ManifestBuildError(
+                    f"Annotation {row['annotation_id']!r} exceeds image bounds"
+                )
         box_key = (sample_id, x, y, width, height)
         if box_key in seen_boxes:
             raise ManifestBuildError(f"Duplicate bounding box for sample {sample_id!r}")
