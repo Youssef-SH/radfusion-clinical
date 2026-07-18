@@ -3,8 +3,8 @@
 ## Source and access
 
 The adapter uses the Stage 2 files from the RSNA Pneumonia Detection Challenge. Access is through
-the competition host and remains subject to the dataset's terms. The repository does not
-redistribute source CSV files or DICOM images.
+the competition host under the dataset's terms. Source CSV files and DICOM images remain in
+user-managed local storage.
 
 The optional acquisition dependency group provides the Kaggle CLI so you can download the
 competition data after accepting the rules and configuring authentication outside this repository:
@@ -27,9 +27,8 @@ stage_2_train_images/    26,684 labeled DICOMs
 stage_2_test_images/      3,000 unlabeled DICOMs
 ```
 
-There are 29,684 DICOM files in total. The adapter includes only the 26,684 images with training
-labels. Competition test images have no released target and are not assigned invented labels or
-splits.
+There are 29,684 DICOM files in total. The bundle contains the 26,684 images with training labels.
+The 3,000 competition test images remain source-only because targets are unavailable.
 
 ## Labels
 
@@ -44,15 +43,22 @@ no annotation rows.
 - `No Lung Opacity / Not Normal`
 - `Lung Opacity`
 
-The class is encoded as the auxiliary `rsna_class` task in the label artifact. `Target=1` must
-correspond to `Lung Opacity`; `Target=0` must not.
+The class is encoded as the auxiliary `rsna_class` task in the label artifact. `Target=1` pairs
+with `Lung Opacity`; `Target=0` pairs with either remaining class.
 
 The challenge target is derived from the public competition labeling process. It is not equivalent
 to microbiologically confirmed clinical pneumonia.
 
+## Patient split
+
+The labeled cohort receives a deterministic 70/15/15 train, validation, and test assignment,
+stratified on the pneumonia target at the patient level with seed 42. The split artifact is part of
+the validated bundle. Its recipe ID, cohort fingerprint, and assignment ID bind the policy,
+population, and exact sample mapping. Audit reports contain aggregate counts only.
+
 ## DICOM characteristics
 
-All 26,684 labeled headers were read without decoding pixels. Verified aggregate properties:
+All 26,684 labeled headers were read with pixel decoding disabled. Verified aggregate properties:
 
 - 1024 × 1024 pixels
 - `MONOCHROME2`
@@ -63,11 +69,17 @@ All 26,684 labeled headers were read without decoding pixels. Verified aggregate
 
 Patient age, sex, projection, and pixel spacing enter the sample artifact. Image dimensions,
 photometric interpretation, transfer syntax, bit depth, compression, modality, body part, and UID
-consistency are aggregate audit fields. Names, raw DICOM UIDs, dates, referring physician fields,
-and implementation metadata are excluded from row-level artifacts.
+consistency are aggregate audit fields.
+
+The bundle authenticates each source CSV and DICOM file by SHA-256. Metadata models consume
+validated DICOM header fields. SOP Instance UID is required and unique across labeled samples.
+
+Metadata values and missingness, including pixel spacing, can encode demographic, workflow,
+acquisition, and equipment associations. The metadata-only baselines quantify those associations
+only within the internal patient-disjoint RSNA challenge holdout.
 
 ## Known data-quality findings
 
 RSNA age values use bare integers interpreted as years under a compatibility rule. Standard DICOM
-day, week, month, and year forms are also supported. Five observed values exceed 120 years. They
-are preserved and counted as implausible; they are not clipped or silently corrected.
+day, week, month, and year forms are also supported. The bundle preserves five observed values
+above 120 years and counts them as implausible.

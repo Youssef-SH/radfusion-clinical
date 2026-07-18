@@ -1,26 +1,26 @@
 # RadFusion-Clinical
 
-RadFusion-Clinical investigates whether structured clinical information improves pneumonia
-prediction from chest radiographs. The repository implements deterministic ingestion of the RSNA
-Pneumonia Detection Challenge Stage 2 training set.
+RadFusion-Clinical is a reproducible machine-learning benchmark and experimentation framework for radiographic pneumonia prediction, currently centered on the RSNA Pneumonia Detection Challenge. The current implementation provides deterministic data preparation, patient-disjoint evaluation, and reproducible metadata-based baselines.
 
-> Research prototype only. Not intended for clinical decision-making.
+> This is a research and educational prototype. It is not a medical device and must not be used for clinical decision-making.
 
 ## Implemented capabilities
 
-- Exact parsing and joins across RSNA labels, detailed classes, and labeled training images
-- Metadata-only DICOM header extraction without pixel decoding
-- Aggregate DICOM and data-quality metadata without patient-level report content
-- Task-agnostic samples, normalized task labels, and bounding-box annotation artifacts
-- Exact Arrow schemas and validation before and after Parquet serialization
-- Deterministic ordering and source, Arrow IPC, and serialized-file SHA-256 hashes
-- Immutable bundle publication with an atomically updated `CURRENT` marker
+- Validated joins across RSNA labels, classes, and DICOM images
+- DICOM header extraction and aggregate data-quality reporting
+- Typed samples, labels, bounding-box annotations, and patient-disjoint splits
+- SHA-256 source inventory for every labeled DICOM
+- Content-addressed immutable bundles with exact schemas and integrity validation
+- Metadata preprocessing fitted on the training split and fixed Logistic Regression and LightGBM
+  baselines
+- Binary evaluation metrics and MLflow experiment lineage
+- Immutable run-qualified model artifacts with exact source, dependency-lock, and run lineage
 - Ruff, pytest, pre-commit, and continuous-integration checks
 
 ## Setup
 
-The project requires Python 3.13 and [uv](https://docs.astral.sh/uv/). The default environment does
-not install data-acquisition tooling.
+The project requires Python 3.13 and [uv](https://docs.astral.sh/uv/). Data-acquisition tooling is
+available through the optional `acquisition` dependency group.
 
 ```bash
 uv sync --locked
@@ -31,49 +31,57 @@ uv run pre-commit install
 
 Obtain the RSNA Pneumonia Detection Challenge data under its original access terms and extract it
 to `data/raw/rsna/extracted/`. The required filenames and directory layout are documented in
-[`data/README.md`](data/README.md). Raw data and generated manifests are ignored by Git.
+[`data/README.md`](data/README.md).
 
 ## Commands
 
 ```bash
-make rsna-manifest   # build samples, labels, annotations, and aggregate metadata
-make check           # Ruff lint, Ruff format check, and unit/contract tests
+make rsna-manifest   # publish an RSNA bundle
+make rsna-audit      # generate aggregate dataset reports under reports/rsna
+make train CONFIG=configs/metadata_logistic.yaml
+make train CONFIG=configs/metadata_lightgbm.yaml
+make clean           # remove reproducible outputs while preserving raw datasets
+make check           # lock consistency, Ruff checks, and unit/contract tests
 make pre-commit      # run repository hooks against all tracked files
 make inspect FILE=path/to/image.dcm
 ```
 
-Generated files:
+Every executable experiment is declared by a validated YAML file under `configs/`. See
+[`docs/training.md`](docs/training.md) for the training workflow.
 
-```text
-data/manifests/rsna/CURRENT
-data/manifests/rsna/builds/<bundle-id>/rsna_samples.parquet
-data/manifests/rsna/builds/<bundle-id>/rsna_labels.parquet
-data/manifests/rsna/builds/<bundle-id>/rsna_annotations.parquet
-data/manifests/rsna/builds/<bundle-id>/rsna_manifest_metadata.json
-```
+## Cleaning generated artifacts
+
+Run `make clean` to remove generated reports, models, experiment state, Python caches, and bundles.
+Git ignores these outputs, and the pipeline regenerates them from source data. Raw source datasets
+remain under `data/raw/`.
 
 ## Repository layout
 
 ```text
-src/radfusion/data/   ingestion, schemas, validation, and hashing
-tests/                unit and contract tests
-docs/                 architecture, data contracts, dataset, privacy, and reproducibility
-data/                 ignored local inputs and generated artifacts
-scripts/              small inspection utilities
+src/radfusion/data/        ingestion, splits, audits, schemas, validation, and hashing
+src/radfusion/models/      fixed estimator definitions
+src/radfusion/training/    reusable training entry points
+src/radfusion/evaluation/  metrics and aggregate evaluation plots
+configs/                   experiment definitions
+tests/                     unit, contract, and local integration tests
+docs/                      architecture, data contracts, privacy, and reproducibility
+data/                      ignored local inputs and generated artifacts
+scripts/                   small inspection utilities
 ```
 
 ## Privacy boundary
 
-Do not commit DICOMs, patient-level manifests, credentials, or real patient examples. See
-[`docs/privacy.md`](docs/privacy.md).
+Keep DICOMs, patient-level bundle artifacts, credentials, and real patient examples outside
+version control. See [`docs/privacy.md`](docs/privacy.md).
 
 ## Limitations
 
-- Includes the labeled RSNA Stage 2 training set.
-- Leaves `split` null until a validated patient-level split policy is defined.
-- Treats the RSNA challenge target as a radiology-derived label, not confirmed clinical diagnosis.
-- Preserves and flags five source ages above 120 years.
-- Currently focuses on deterministic RSNA ingestion. Training, evaluation, serving, and additional dataset adapters are introduced in later milestones.
+- The current implementation covers the labeled RSNA Stage 2 training set and metadata-only
+  baselines.
+- The labels are derived from public radiology-labeling pipelines and are not equivalent to
+  confirmed clinical diagnosis.
 
-Architecture, artifact contracts, data handling, and rebuild guarantees are documented under
-[`docs/`](docs/).
+See [`docs/architecture.md`](docs/architecture.md) for system structure,
+[`docs/data_contract.md`](docs/data_contract.md) for artifact contracts, and
+[`docs/reproducibility.md`](docs/reproducibility.md) for reconstruction details. RSNA-specific
+facts are documented in [`docs/datasets/rsna.md`](docs/datasets/rsna.md).

@@ -1,29 +1,30 @@
 # Privacy and data handling
 
-The repository contains code and aggregate metadata, not clinical data. Access and use follow each
-dataset's terms.
+The version-controlled repository contains code, documentation, configuration, and synthetic
+fixtures. Raw and generated patient-level data remains in ignored local storage under the terms of
+its source dataset.
 
-## Never commit
+## Version-control boundary
 
-- DICOM images or other medical images
-- Source CSV files containing patient-level rows
-- Generated sample or feature manifests
-- Laboratory or clinical-note rows
-- Model or experiment artifacts that contain patient data
-- Access tokens, credentials, or private keys
-- Screenshots containing patient-level values
+Keep these materials outside version control:
 
-The `.gitignore` is a guard, not the privacy policy. Review staged files before every commit.
+- DICOM images and other medical images;
+- source tables containing patient-level rows;
+- generated bundles and source inventories;
+- model and experiment artifacts;
+- clinical-note or laboratory rows;
+- credentials, access tokens, and private keys;
+- screenshots containing patient-level values.
 
-## Data use
+Review staged files against this policy before each commit. `.gitignore` provides baseline
+filtering.
 
-Keep raw and generated patient-level data in ignored local storage. Do not send patient-level data
-to external AI, analytics, artifact-storage, or collaboration services unless the dataset terms and
-project data-handling policy explicitly permit it. Public examples and API fixtures must be
-synthetic.
+## Reports
 
-Technical reports may contain aggregate counts, distributions, quality findings, and metrics only
-when individuals cannot be reconstructed. Raw identifiers and row-level examples are excluded.
+Public reports contain aggregate counts, distributions, quality findings, and model metrics.
+Publication checks reject source patient IDs, sample IDs, image names and paths, UUID-shaped
+identifiers, and DICOM UID-shaped values. Model evaluation reports are also logged to MLflow after
+privacy validation.
 
-Follow each dataset's access and storage requirements. A dataset adapter does not grant permission
-to redistribute inputs or derived artifacts.
+Public examples and test fixtures use synthetic data. External transfer of raw or derived data
+requires the dataset terms and project data-handling policy to permit the destination and use.
