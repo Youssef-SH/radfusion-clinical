@@ -1,4 +1,4 @@
-"""Provide the command-line entry point for RSNA artifact bundle generation."""
+"""Publish a validated RSNA artifact bundle."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 
 from radfusion.data.rsna_artifacts import build_rsna_artifacts, write_bundle
 from radfusion.data.rsna_source import ManifestBuildError
+from radfusion.data.splitting import SplitConfig
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -26,13 +27,38 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("data/manifests"),
         help="Root directory for versioned RSNA artifact bundles",
     )
+    parser.add_argument("--split-seed", type=int, default=42, help="Patient split seed")
+    parser.add_argument(
+        "--train-ratio",
+        type=float,
+        default=0.70,
+        help="Training patient ratio",
+    )
+    parser.add_argument(
+        "--validation-ratio",
+        type=float,
+        default=0.15,
+        help="Validation patient ratio",
+    )
+    parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=0.15,
+        help="Test patient ratio",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        result = build_rsna_artifacts(args.dataset_root)
+        split_config = SplitConfig(
+            seed=args.split_seed,
+            train_ratio=args.train_ratio,
+            validation_ratio=args.validation_ratio,
+            test_ratio=args.test_ratio,
+        )
+        result = build_rsna_artifacts(args.dataset_root, split_config)
         written = write_bundle(result, args.output_directory)
     except (ManifestBuildError, OSError) as exc:
         print(f"RSNA manifest build failed: {exc}", file=sys.stderr)
@@ -47,6 +73,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "sample_count": result.samples.num_rows,
                 "label_count": result.labels.num_rows,
                 "annotation_count": result.annotations.num_rows,
+                "split_count": result.splits.num_rows,
+                "split_recipe_id": result.splits.column("split_recipe_id")[0].as_py(),
+                "cohort_fingerprint": result.splits.column("cohort_fingerprint")[0].as_py(),
+                "split_assignment_id": result.splits.column("split_assignment_id")[0].as_py(),
                 "arrow_ipc_sha256": dict(written.arrow_ipc_sha256),
             },
             indent=2,

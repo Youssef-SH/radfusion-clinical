@@ -1,0 +1,37 @@
+config_version: 1
+name: metadata_logistic_regression
+executable: true
+
+dataset:
+  registry_key: rsna
+  manifest_directory: data/manifests
+  task_id: pneumonia
+
+model:
+  registry_key: metadata_logistic
+  output_name: metadata_logistic_regression
+  modality: metadata
+  class_weighting: balanced
+  parameters:
+    l1_ratio: 0.0
+    solver: liblinear
+    C: 1.0
+    max_iter: 2000
+  fit_parameters: {}
+
+training:
+  seed: 42
+  report_directory: reports
+  model_directory: models/rsna
+  require_clean_git: true
+
+evaluation:
+  threshold_policy: youden_j
+  sensitivity_target: 0.90
+  calibration_bins: 15
+  latency_warmup_calls: 100
+  latency_measured_calls: 1000
+
+mlflow:
+  experiment_name: radfusion-rsna
+  tracking_directory: mlruns

@@ -1,7 +1,7 @@
 # Local data workspace
 
-This directory holds local source data and generated patient-level artifacts. Its contents are
-ignored except for this file and directory placeholders.
+This directory holds local source data and generated patient-level artifacts. Git tracks this file
+and directory placeholders; local data content is ignored.
 
 Expected RSNA layout:
 
@@ -27,6 +27,8 @@ data/
           rsna_samples.parquet
           rsna_labels.parquet
           rsna_annotations.parquet
+          rsna_splits.parquet
+          rsna_source_inventory.parquet
           rsna_manifest_metadata.json
 ```
 
@@ -38,5 +40,5 @@ the layout above and run:
 make rsna-manifest
 ```
 
-Never force-add raw images, source CSVs, generated manifests, or credentials to Git. These files
-contain patient-level information even when public identifiers are deidentified.
+Keep raw images, source CSVs, generated bundle artifacts, and credentials outside version control.
+These files contain patient-level information even when public identifiers are deidentified.

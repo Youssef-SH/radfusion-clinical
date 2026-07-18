@@ -34,15 +34,16 @@ data/manifests/**
 *.npz
 *.pkl
 *.joblib
+*.skops
 
 # Models and experiment artifacts
-models/
-mlruns/
-mlartifacts/
+/models/
+/mlruns/
+/mlartifacts/
 
 # Secrets
 kaggle.json
 credentials.json
 
 # Generated reports
-reports/*.html
+/reports/

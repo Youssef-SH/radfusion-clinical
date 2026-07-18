@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-MANIFEST_SCHEMA_VERSION = "1.0.0"
+# This development schema identifier changes through an explicit contract decision.
+# Bundle IDs and artifact hashes identify exact bundle content.
+MANIFEST_SCHEMA_VERSION = "0.1.0"
 DATASET_ID = "rsna"
 PNEUMONIA_TASK_ID = "pneumonia"
 PNEUMONIA_LABEL_SOURCE = "rsna-stage-2-challenge-target"
@@ -51,6 +53,28 @@ RSNA_ANNOTATION_SCHEMA = pa.schema(
         pa.field("y", pa.float64(), nullable=False),
         pa.field("width", pa.float64(), nullable=False),
         pa.field("height", pa.float64(), nullable=False),
+    ]
+)
+
+RSNA_SPLIT_SCHEMA = pa.schema(
+    [
+        pa.field("dataset_id", pa.string(), nullable=False),
+        pa.field("sample_id", pa.string(), nullable=False),
+        pa.field("split_name", pa.string(), nullable=False),
+        pa.field("split_recipe_id", pa.string(), nullable=False),
+        pa.field("cohort_fingerprint", pa.string(), nullable=False),
+        pa.field("split_assignment_id", pa.string(), nullable=False),
+        pa.field("split_source", pa.string(), nullable=False),
+    ]
+)
+
+RSNA_SOURCE_INVENTORY_SCHEMA = pa.schema(
+    [
+        pa.field("dataset_id", pa.string(), nullable=False),
+        pa.field("sample_id", pa.string(), nullable=False),
+        pa.field("relative_path", pa.string(), nullable=False),
+        pa.field("byte_size", pa.int64(), nullable=False),
+        pa.field("sha256", pa.string(), nullable=False),
     ]
 )
 

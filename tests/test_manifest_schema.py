@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -16,15 +17,19 @@ from radfusion.data.artifact_validation import (
     validate_label_table,
     validate_sample_table,
 )
-from radfusion.data.hashing import arrow_ipc_sha256
+from radfusion.data.hashing import arrow_ipc_sha256, sha256_file
 from radfusion.data.rsna_artifacts import (
     CURRENT_FILENAME,
+    LABELS_FILENAME,
     SAMPLES_FILENAME,
+    SOURCE_INVENTORY_FILENAME,
     BuildResult,
+    _bundle_id,
     build_rsna_artifacts,
     load_current_bundle,
     write_bundle,
 )
+from radfusion.data.rsna_audit import REPORT_FILENAMES, generate_rsna_audit
 from radfusion.data.rsna_manifest import main
 from radfusion.data.rsna_source import ManifestBuildError, aggregate_labels
 from radfusion.data.schemas import (
@@ -33,7 +38,10 @@ from radfusion.data.schemas import (
     RSNA_CLASS_TASK_ID,
     RSNA_LABEL_SCHEMA,
     RSNA_SAMPLE_SCHEMA,
+    RSNA_SOURCE_INVENTORY_SCHEMA,
+    RSNA_SPLIT_SCHEMA,
 )
+from radfusion.utils.privacy import validate_public_reports
 
 
 def _write_header(
@@ -161,9 +169,13 @@ def test_happy_path_builds_canonical_samples_and_multiple_annotations(tmp_path: 
     assert result.samples.schema == RSNA_SAMPLE_SCHEMA
     assert result.labels.schema == RSNA_LABEL_SCHEMA
     assert result.annotations.schema == RSNA_ANNOTATION_SCHEMA
+    assert result.splits.schema == RSNA_SPLIT_SCHEMA
+    assert result.source_inventory.schema == RSNA_SOURCE_INVENTORY_SCHEMA
     assert result.samples.num_rows == 2
     assert result.labels.num_rows == 4
     assert result.annotations.num_rows == 2
+    assert result.splits.num_rows == 2
+    assert result.source_inventory.num_rows == 2
     positive = result.samples.to_pylist()[1]
     assert positive["sample_id"] == "rsna:positive"
     assert positive["study_id"] is None
@@ -378,7 +390,7 @@ def test_duplicate_boxes_fail() -> None:
         aggregate_labels(_labels_frame([box, box]))
 
 
-def test_out_of_bounds_box_fails(tmp_path: Path) -> None:
+def test_bundle_construction_rejects_box_outside_source_dimensions(tmp_path: Path) -> None:
     root = _write_sources(tmp_path / "extracted")
     labels_path = root / "stage_2_train_labels.csv"
     labels = pd.read_csv(labels_path)
@@ -387,6 +399,14 @@ def test_out_of_bounds_box_fails(tmp_path: Path) -> None:
 
     with pytest.raises(ManifestBuildError, match="exceeds image bounds"):
         build_rsna_artifacts(root)
+
+
+def test_portable_annotation_validation_rejects_invalid_geometry(tmp_path: Path) -> None:
+    _, result = _tables(tmp_path)
+    invalid = _replace_table_row(result.annotations, 0, width=0.0)
+
+    with pytest.raises(ManifestBuildError, match="invalid geometry"):
+        validate_annotation_table(invalid, result.samples, result.labels)
 
 
 def test_nonpositive_image_dimensions_fail(tmp_path: Path) -> None:
@@ -475,7 +495,7 @@ def test_every_positive_sample_requires_an_annotation(tmp_path: Path) -> None:
         validate_annotation_table(empty, result.samples, result.labels, result.image_dimensions)
 
 
-def test_patient_id_is_not_required_to_be_unique(tmp_path: Path) -> None:
+def test_sample_validation_accepts_multiple_samples_for_one_patient(tmp_path: Path) -> None:
     root, result = _tables(tmp_path)
     rows = result.samples.to_pylist()
     duplicate_patient = {
@@ -508,9 +528,11 @@ def test_parquet_round_trip_is_exact_and_nested_free(tmp_path: Path) -> None:
     restored_samples = pq.read_table(written.paths.samples_path)
     restored_labels = pq.read_table(written.paths.labels_path)
     restored_annotations = pq.read_table(written.paths.annotations_path)
+    restored_inventory = pq.read_table(written.paths.source_inventory_path)
     assert restored_samples.equals(result.samples)
     assert restored_labels.equals(result.labels)
     assert restored_annotations.equals(result.annotations)
+    assert restored_inventory.equals(result.source_inventory)
     assert restored_samples.schema == RSNA_SAMPLE_SCHEMA
     assert restored_labels.schema == RSNA_LABEL_SCHEMA
     assert restored_annotations.schema == RSNA_ANNOTATION_SCHEMA
@@ -525,6 +547,74 @@ def test_arrow_ipc_hashes_are_deterministic(tmp_path: Path) -> None:
     assert first.arrow_ipc_sha256 == second.arrow_ipc_sha256
     assert first.paths.bundle_id == second.paths.bundle_id
     assert first.arrow_ipc_sha256[SAMPLES_FILENAME] == arrow_ipc_sha256(result.samples)
+
+
+def test_bundle_id_ignores_nonsemantic_metadata(tmp_path: Path) -> None:
+    _, result = _tables(tmp_path)
+    changed = replace(
+        result,
+        metadata={
+            **result.metadata,
+            "identity_test_field": "ignored",
+            "generation": {"timestamp_utc": "2099-01-01T00:00:00+00:00"},
+            "provenance": {
+                "tool_versions": {
+                    "python": "different",
+                    "pandas": "different",
+                    "pyarrow": "different",
+                    "pydicom": "different",
+                }
+            },
+        },
+    )
+
+    first = write_bundle(result, tmp_path / "first")
+    second = write_bundle(changed, tmp_path / "second")
+
+    assert first.paths.bundle_id == second.paths.bundle_id
+
+
+def test_bundle_id_changes_with_semantic_metadata(tmp_path: Path) -> None:
+    _, result = _tables(tmp_path)
+    changed = replace(
+        result,
+        metadata={**result.metadata, "dataset_version": "semantic-change"},
+    )
+
+    first = write_bundle(result, tmp_path / "first")
+    second = write_bundle(changed, tmp_path / "second")
+
+    assert first.paths.bundle_id != second.paths.bundle_id
+
+
+def test_bundle_validation_ignores_provenance_and_generation_changes(tmp_path: Path) -> None:
+    _, result = _tables(tmp_path)
+    output = tmp_path / "manifests"
+    written = write_bundle(result, output)
+    original_id = written.paths.bundle_id
+    metadata = json.loads(written.paths.metadata_path.read_text(encoding="utf-8"))
+    metadata["generation"]["timestamp_utc"] = "2099-01-01T00:00:00+00:00"
+    metadata["provenance"]["tool_versions"] = {"python": "different"}
+    written.paths.metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    assert load_current_bundle(output).bundle_id == original_id
+
+
+def test_bundle_id_changes_with_split_policy_and_artifact_hashes(tmp_path: Path) -> None:
+    _, result = _tables(tmp_path)
+    arrow_hashes = {"table": "arrow-a"}
+    file_hashes = {"table": "file-a"}
+    original = _bundle_id(arrow_hashes, file_hashes, result.metadata)
+    changed_split = {
+        **result.metadata,
+        "split": {**result.metadata["split"], "seed": 43},
+    }
+
+    assert _bundle_id(arrow_hashes, file_hashes, changed_split) != original
+    assert _bundle_id({"table": "arrow-b"}, file_hashes, result.metadata) != original
+    assert _bundle_id(arrow_hashes, {"table": "file-b"}, result.metadata) != original
 
 
 def test_staging_failure_preserves_current_bundle(
@@ -556,6 +646,110 @@ def test_consumer_rejects_bundle_with_hash_mismatch(tmp_path: Path) -> None:
         load_current_bundle(tmp_path / "manifests")
 
 
+def test_consumer_rejects_declared_artifact_hash_tampering(tmp_path: Path) -> None:
+    _, result = _tables(tmp_path)
+    output = tmp_path / "manifests"
+    written = write_bundle(result, output)
+    metadata = json.loads(written.paths.metadata_path.read_text(encoding="utf-8"))
+    metadata["generated_artifact_hashes"][LABELS_FILENAME]["file_sha256"] = "tampered"
+    written.paths.metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ManifestBuildError, match="File hash mismatch"):
+        load_current_bundle(output)
+
+
+@pytest.mark.parametrize("entry_kind", ["file", "directory", "symlink"])
+def test_consumer_rejects_unexpected_bundle_entries(tmp_path: Path, entry_kind: str) -> None:
+    _, result = _tables(tmp_path)
+    output = tmp_path / "manifests"
+    written = write_bundle(result, output)
+    unexpected = written.paths.bundle_directory / "unexpected"
+    if entry_kind == "file":
+        unexpected.write_text("unexpected\n", encoding="utf-8")
+    elif entry_kind == "directory":
+        unexpected.mkdir()
+    else:
+        unexpected.symlink_to(written.paths.samples_path.name)
+
+    with pytest.raises(ManifestBuildError, match="unexpected artifact set"):
+        load_current_bundle(output)
+
+
+@pytest.mark.parametrize("attribute", ["labels_path", "metadata_path"])
+def test_consumer_rejects_required_bundle_artifact_symlinks(tmp_path: Path, attribute: str) -> None:
+    _, result = _tables(tmp_path)
+    output = tmp_path / "manifests"
+    written = write_bundle(result, output)
+    required_path = getattr(written.paths, attribute)
+    external = tmp_path / f"external-{required_path.name}"
+    required_path.rename(external)
+    required_path.symlink_to(external)
+
+    with pytest.raises(ManifestBuildError, match="regular non-symlink"):
+        load_current_bundle(output)
+
+
+def test_consumer_rejects_extra_declared_artifact(tmp_path: Path) -> None:
+    _, result = _tables(tmp_path)
+    output = tmp_path / "manifests"
+    written = write_bundle(result, output)
+    metadata = json.loads(written.paths.metadata_path.read_text(encoding="utf-8"))
+    metadata["generated_artifact_hashes"]["unexpected.parquet"] = {}
+    written.paths.metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ManifestBuildError, match="unexpected artifact set"):
+        load_current_bundle(output)
+
+
+def test_consumer_rejects_unsupported_manifest_schema(tmp_path: Path) -> None:
+    _, result = _tables(tmp_path)
+    output = tmp_path / "manifests"
+    written = write_bundle(result, output)
+    metadata = json.loads(written.paths.metadata_path.read_text(encoding="utf-8"))
+    metadata["manifest_schema_version"] = "unsupported"
+    written.paths.metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(ManifestBuildError, match="Unsupported manifest_schema_version"):
+        load_current_bundle(output)
+
+
+def test_source_inventory_authenticates_every_dicom_and_detects_tampering(tmp_path: Path) -> None:
+    root, result = _tables(tmp_path)
+    rows = result.source_inventory.to_pylist()
+    assert {row["relative_path"] for row in rows} == {
+        "stage_2_train_images/negative.dcm",
+        "stage_2_train_images/positive.dcm",
+    }
+    for row in rows:
+        source = root / row["relative_path"]
+        assert row["byte_size"] == source.stat().st_size
+        assert row["sha256"] == sha256_file(source)
+
+    written = write_bundle(result, tmp_path / "manifests")
+    written.paths.source_inventory_path.write_bytes(b"tampered")
+    with pytest.raises(ManifestBuildError, match="hash mismatch"):
+        load_current_bundle(tmp_path / "manifests")
+
+
+def test_consumer_rejects_metadata_that_does_not_match_bundle_id(tmp_path: Path) -> None:
+    _, result = _tables(tmp_path)
+    output = tmp_path / "manifests"
+    written = write_bundle(result, output)
+    metadata = json.loads(written.paths.metadata_path.read_text(encoding="utf-8"))
+    metadata["split"]["seed"] = 43
+    written.paths.metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ManifestBuildError, match="Bundle ID"):
+        load_current_bundle(output)
+
+
 def test_cli_success_and_failure_exit_codes(tmp_path: Path) -> None:
     root = _write_sources(tmp_path / "extracted")
     output = tmp_path / "manifests"
@@ -565,13 +759,31 @@ def test_cli_success_and_failure_exit_codes(tmp_path: Path) -> None:
     assert current.current_path.name == CURRENT_FILENAME
     assert current.samples_path.is_file()
     assert current.labels_path.is_file()
+    assert current.splits_path.is_file()
+    assert current.source_inventory_path.is_file()
     metadata = json.loads(current.metadata_path.read_text(encoding="utf-8"))
     assert metadata["sample_count"] == 2
     assert metadata["label_count"] == 4
-    assert metadata["hash_policy"]["arrow_ipc_pyarrow_version"] == pa.__version__
+    assert metadata["manifest_schema_version"] == "0.1.0"
+    assert metadata["split"]["patient_hash_algorithm"] == "sha256"
+    assert metadata["split"]["patient_hash_input_encoding"] == "utf-8"
+    assert metadata["split"]["patient_hash_input_template"] == "<seed>\\0<patient_id>"
+    assert metadata["split"]["stratification_target"] == "pneumonia"
+    assert (
+        metadata["split"]["allocation_rule"]
+        == "feasible-minimum-then-largest-remainder-canonical-tiebreak"
+    )
+    assert metadata["split"]["seed"] == 42
+    assert metadata["split"]["ratios"] == {"train": 0.7, "validation": 0.15, "test": 0.15}
+    assert metadata["split"]["split_recipe_id"].startswith("split-recipe-")
+    assert metadata["split"]["cohort_fingerprint"].startswith("cohort-")
+    assert metadata["split"]["split_assignment_id"].startswith("split-assignment-")
+    assert metadata["source_inventory_count"] == 2
+    assert SOURCE_INVENTORY_FILENAME in metadata["generated_artifact_hashes"]
+    assert metadata["provenance"]["arrow_ipc_runtime"]["pyarrow_version"] == pa.__version__
     assert (
         "cross-version stability is not claimed"
-        in metadata["hash_policy"]["arrow_ipc_stability_scope"]
+        in metadata["provenance"]["arrow_ipc_runtime"]["stability_scope"]
     )
     assert main(["--dataset-root", str(tmp_path / "missing")]) == 1
 
@@ -593,3 +805,27 @@ def test_real_rsna_aggregate_contract() -> None:
         if row["task_id"] == PNEUMONIA_TASK_ID
     )
     assert targets == {0: 20_672, 1: 6_012}
+
+
+@pytest.mark.integration
+def test_real_rsna_audit_reports_are_aggregate(tmp_path: Path) -> None:
+    root = Path("data/raw/rsna/extracted")
+    if not (root / "stage_2_train_images").is_dir():
+        pytest.skip("Local RSNA data is not available")
+    output = tmp_path / "manifests"
+    write_bundle(build_rsna_artifacts(root), output)
+
+    report_directory = tmp_path / "reports" / "rsna"
+    summary = generate_rsna_audit(output, report_directory)
+
+    assert set(path.name for path in report_directory.iterdir()) == set(REPORT_FILENAMES)
+    assert summary["reports"] == list(REPORT_FILENAMES)
+    sample_rows = build_rsna_artifacts(root).samples.slice(0, 10).to_pylist()
+    source_values = {
+        str(row[field])
+        for row in sample_rows
+        for field in ("patient_id", "sample_id", "image_id", "image_path")
+    }
+    source_values.update(Path(row["image_path"]).name for row in sample_rows)
+    source_values.update(Path(row["image_path"]).stem for row in sample_rows)
+    validate_public_reports(report_directory.iterdir(), forbidden_source_values=source_values)
