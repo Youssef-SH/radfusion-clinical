@@ -1,0 +1,35 @@
+config_version: 1
+name: fusion_concat_placeholder
+executable: false
+
+dataset:
+  registry_key: rsna
+  manifest_directory: data/manifests
+  task_id: pneumonia
+
+model:
+  registry_key: fusion_concat
+  output_name: fusion_concat
+  modality: image_metadata
+  class_weighting: configured
+  parameters:
+    fusion_type: concatenation
+    fusion_hidden_dim: 256
+  fit_parameters: {}
+
+training:
+  seed: 42
+  report_directory: reports
+  model_directory: models/rsna
+  require_clean_git: true
+
+evaluation:
+  threshold_policy: youden_j
+  sensitivity_target: 0.90
+  calibration_bins: 15
+  latency_warmup_calls: 100
+  latency_measured_calls: 1000
+
+mlflow:
+  experiment_name: radfusion-rsna
+  tracking_directory: mlruns
