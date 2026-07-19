@@ -25,14 +25,14 @@ def _tables() -> tuple[pa.Table, pa.Table]:
         sample_id = f"rsna:{name}"
         samples.append(
             {
-                "dataset_id": "rsna",
                 "sample_id": sample_id,
                 "patient_id": name,
-                "study_id": None,
                 "image_id": name,
                 "image_path": f"stage_2_train_images/{name}.dcm",
-                "split": None,
+                "image_rows": 1024,
+                "image_columns": 1024,
                 "age_years": age,
+                "age_is_implausible": False,
                 "sex": sex,
                 "view_position": view,
                 "pixel_spacing_row_mm": spacing,
@@ -41,13 +41,8 @@ def _tables() -> tuple[pa.Table, pa.Table]:
         )
         splits.append(
             {
-                "dataset_id": "rsna",
                 "sample_id": sample_id,
                 "split_name": split_name,
-                "split_recipe_id": "test-recipe",
-                "cohort_fingerprint": "test-cohort",
-                "split_assignment_id": "test-assignment",
-                "split_source": "generated:patient-stratified-pneumonia",
             }
         )
     return (

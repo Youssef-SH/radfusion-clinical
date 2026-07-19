@@ -17,7 +17,7 @@ The lifecycle is: source dataset → build execution → immutable bundle → va
 | --- | --- |
 | Source adapter | Parse source tables, discover DICOM files, and extract selected headers |
 | Artifact builder | Normalize typed records and construct patient-level assignments |
-| Validator | Enforce schemas, relationships, identities, paths, and ordering |
+| Validator | Enforce schemas, relationships, paths, identities, and ordering |
 | Bundle publisher | Publish immutable bundles and update `CURRENT` atomically |
 | Audit generator | Produce aggregate dataset reports from a validated bundle |
 | Dataset registry | Resolve a configured bundle adapter |
@@ -29,6 +29,10 @@ Dataset adapters isolate source-specific behavior. Training consumes validated b
 parses raw dataset files. Model adapters own estimator construction and fitting. One runner serves
 all registered experiment types.
 
+The manifest owns dataset, task, split, source, and artifact lineage. Parquet tables contain
+row-level facts, while audits contain derived descriptions. `CURRENT` selects a bundle for
+interactive commands; scientific runs record the resolved bundle ID.
+
 ## Data flow
 
 ```text
@@ -37,7 +41,7 @@ RSNA source files
     → validated tables and manifest
     → immutable bundle
     → audit or experiment runner
-    → aggregate reports, immutable models, and MLflow runs
+    → bundle-qualified audits or experiment outputs
 ```
 
 Artifact schemas are defined in [`data_contract.md`](data_contract.md). Experiment composition is

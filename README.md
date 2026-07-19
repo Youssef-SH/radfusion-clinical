@@ -37,7 +37,7 @@ to `data/raw/rsna/extracted/`. The required filenames and directory layout are d
 
 ```bash
 make rsna-manifest   # publish an RSNA bundle
-make rsna-audit      # generate aggregate dataset reports under reports/rsna
+make rsna-audit      # generate reports under reports/rsna/audit/<bundle-id>
 make train CONFIG=configs/metadata_logistic.yaml
 make train CONFIG=configs/metadata_lightgbm.yaml
 make clean           # remove reproducible outputs while preserving raw datasets

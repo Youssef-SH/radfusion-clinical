@@ -140,22 +140,19 @@ def test_synthetic_logistic_experiment_completes_full_training_orchestration(
             name = f"synthetic-{split_name}-{index}"
             frame_rows.append(
                 {
-                    "dataset_id": "rsna",
                     "sample_id": f"rsna:{name}",
                     "patient_id": name,
-                    "study_id": None,
                     "image_id": name,
                     "image_path": f"stage_2_train_images/{name}.dcm",
-                    "split": None,
+                    "image_rows": 1024,
+                    "image_columns": 1024,
                     "age_years": 30.0 + 20.0 * target + split_index,
+                    "age_is_implausible": False,
                     "sex": "F" if split_name == "train" else "M",
                     "view_position": "PA" if split_name == "train" else "AP",
                     "pixel_spacing_row_mm": 0.14 + 0.02 * target,
                     "pixel_spacing_col_mm": 0.14 + 0.02 * target,
                     "split_name": split_name,
-                    "split_recipe_id": "recipe-synthetic",
-                    "cohort_fingerprint": "cohort-synthetic",
-                    "split_assignment_id": "assignment-synthetic",
                     "target": target,
                 }
             )
@@ -164,7 +161,6 @@ def test_synthetic_logistic_experiment_completes_full_training_orchestration(
         frame=frame,
         bundle_id="build-synthetic",
         split_recipe_id="recipe-synthetic",
-        cohort_fingerprint="cohort-synthetic",
         split_assignment_id="assignment-synthetic",
         label_policy_version="label-synthetic",
     )
@@ -233,7 +229,6 @@ def test_synthetic_logistic_experiment_completes_full_training_orchestration(
     assert lineage["config_source_sha256"] == hashlib.sha256(config_path.read_bytes()).hexdigest()
     assert lineage["bundle_id"] == dataset.bundle_id
     assert lineage["split_recipe_id"] == dataset.split_recipe_id
-    assert lineage["cohort_fingerprint"] == dataset.cohort_fingerprint
     assert lineage["split_assignment_id"] == dataset.split_assignment_id
     assert lineage["training_seed"] == config.training.seed
     assert lineage["git_commit"] == "commit-synthetic"

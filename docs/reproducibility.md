@@ -31,8 +31,8 @@ uv run python -m radfusion.data.rsna_manifest \
   --test-ratio 0.15
 ```
 
-The build authenticates both source CSV files and every labeled DICOM by SHA-256. It validates
-each generated artifact before publishing the immutable bundle and updating `CURRENT`.
+The build authenticates both source CSV files and every labeled DICOM by SHA-256. It validates the
+complete staged bundle before publishing it and updating `CURRENT`.
 
 The default split recipe groups samples by patient and stratifies on the binary challenge target.
 Within each target stratum, patients are ordered by SHA-256 of the UTF-8 bytes
@@ -41,8 +41,20 @@ patient per positive-ratio destination when feasible, then applies largest remai
 train, validation, test order. For smaller strata, patients fill the highest-ratio destinations,
 with canonical order breaking equal-ratio ties.
 
-The split recipe ID hashes the complete policy. The cohort fingerprint hashes canonical patient
-membership and targets. The split assignment ID hashes the recipe, cohort, and assignments.
+The split recipe ID hashes only the algorithm version, seed, stratification target, and ordered
+ratios. The algorithm version binds patient grouping, SHA-256 ranking, UTF-8 input encoding,
+patient-ID collision tie-breaking, allocation, and canonical split order.
+
+The split assignment ID hashes the canonical sorted `(sample_id, split_name)` mapping. It is stable
+for the same assignment and changes when any assignment changes.
+
+Logical Arrow hashes cover each artifact's exact schema and canonical ordered values. Canonical
+null handling keeps these hashes stable across valid Parquet round trips. Logical hashes
+participate in the semantic bundle ID.
+
+Physical Parquet hashes cover serialized file bytes and detect corruption. They can differ across
+valid encodings of the same logical tables and do not participate in bundle identity. The exact
+identity and acceptance rules are defined in [`data_contract.md`](data_contract.md).
 
 ## Generate audits and experiments
 
@@ -51,6 +63,9 @@ make rsna-audit
 make train CONFIG=configs/metadata_logistic.yaml
 make train CONFIG=configs/metadata_lightgbm.yaml
 ```
+
+Audits are published under `reports/rsna/audit/<bundle-id>/`. Rebuilding one audit replaces only
+that bundle-qualified audit directory.
 
 Preprocessing is fitted on training data. Validation selects the LightGBM stopping point and both
 operating thresholds. The fixed pipeline is then evaluated on the patient-disjoint internal test

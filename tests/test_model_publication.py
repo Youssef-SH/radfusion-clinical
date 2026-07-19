@@ -20,7 +20,6 @@ def _lineage() -> dict[str, object]:
         "task_id": "pneumonia",
         "config_source_sha256": _SHA256,
         "bundle_id": "build-test",
-        "cohort_fingerprint": "cohort-test",
         "split_recipe_id": "recipe-test",
         "split_assignment_id": "assignment-test",
         "label_policy_version": "label-test",

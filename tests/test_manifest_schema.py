@@ -19,14 +19,17 @@ from radfusion.data.artifact_validation import (
 )
 from radfusion.data.hashing import arrow_ipc_sha256, sha256_file
 from radfusion.data.rsna_artifacts import (
+    ANNOTATIONS_FILENAME,
     CURRENT_FILENAME,
     LABELS_FILENAME,
     SAMPLES_FILENAME,
     SOURCE_INVENTORY_FILENAME,
+    SPLITS_FILENAME,
     BuildResult,
     _bundle_id,
     build_rsna_artifacts,
     load_current_bundle,
+    validate_bundle_directory,
     write_bundle,
 )
 from radfusion.data.rsna_audit import REPORT_FILENAMES, generate_rsna_audit
@@ -178,8 +181,9 @@ def test_happy_path_builds_canonical_samples_and_multiple_annotations(tmp_path: 
     assert result.source_inventory.num_rows == 2
     positive = result.samples.to_pylist()[1]
     assert positive["sample_id"] == "rsna:positive"
-    assert positive["study_id"] is None
-    assert positive["split"] is None
+    assert positive["image_rows"] == 1024
+    assert positive["image_columns"] == 1024
+    assert positive["age_is_implausible"] is False
     assert positive["image_path"] == "stage_2_train_images/positive.dcm"
     assert "target_pneumonia" not in positive
     assert "rsna_class" not in positive
@@ -193,6 +197,39 @@ def test_happy_path_builds_canonical_samples_and_multiple_annotations(tmp_path: 
         if row["sample_id"] == "rsna:positive"
     }
     assert positive_labels == {PNEUMONIA_TASK_ID: 1, RSNA_CLASS_TASK_ID: 2}
+
+
+def test_final_rsna_schemas_contain_only_row_level_facts() -> None:
+    assert RSNA_SAMPLE_SCHEMA.names == [
+        "sample_id",
+        "patient_id",
+        "image_id",
+        "image_path",
+        "image_rows",
+        "image_columns",
+        "age_years",
+        "age_is_implausible",
+        "sex",
+        "view_position",
+        "pixel_spacing_row_mm",
+        "pixel_spacing_col_mm",
+    ]
+    assert RSNA_LABEL_SCHEMA.names == ["sample_id", "task_id", "label_value"]
+    assert RSNA_ANNOTATION_SCHEMA.names == [
+        "sample_id",
+        "annotation_id",
+        "x",
+        "y",
+        "width",
+        "height",
+    ]
+    assert RSNA_SPLIT_SCHEMA.names == ["sample_id", "split_name"]
+    assert RSNA_SOURCE_INVENTORY_SCHEMA.names == [
+        "sample_id",
+        "relative_path",
+        "byte_size",
+        "sha256",
+    ]
 
 
 def test_all_negative_fixture_has_empty_typed_annotations(tmp_path: Path) -> None:
@@ -321,12 +358,14 @@ def test_malformed_and_implausible_ages_are_reported_in_aggregate(tmp_path: Path
         malformed_root = _write_sources(tmp_path / "malformed", age="BAD")
     malformed = build_rsna_artifacts(malformed_root)
     assert malformed.samples.to_pylist()[1]["age_years"] is None
+    assert malformed.samples.to_pylist()[1]["age_is_implausible"] is False
     assert malformed.metadata["age_parsing_summary"]["status_counts"]["malformed"] == 1
 
     with pytest.warns(UserWarning, match="Invalid value for VR AS"):
         implausible_root = _write_sources(tmp_path / "implausible", age="155")
     implausible = build_rsna_artifacts(implausible_root)
     assert implausible.samples.to_pylist()[1]["age_years"] == 155.0
+    assert implausible.samples.to_pylist()[1]["age_is_implausible"] is True
     assert implausible.metadata["implausible_age_count"] == 1
 
 
@@ -409,6 +448,19 @@ def test_portable_annotation_validation_rejects_invalid_geometry(tmp_path: Path)
         validate_annotation_table(invalid, result.samples, result.labels)
 
 
+def test_portable_annotation_validation_uses_stored_sample_dimensions(tmp_path: Path) -> None:
+    _, result = _tables(tmp_path)
+    samples = _replace_table_row(
+        result.samples,
+        1,
+        image_rows=1,
+        image_columns=1,
+    )
+
+    with pytest.raises(ManifestBuildError, match="exceeds image bounds"):
+        validate_annotation_table(result.annotations, samples, result.labels)
+
+
 def test_nonpositive_image_dimensions_fail(tmp_path: Path) -> None:
     root = _write_sources(tmp_path / "extracted")
     _write_header(root / "stage_2_train_images" / "positive.dcm", "positive", rows=0)
@@ -438,7 +490,7 @@ def test_annotation_schema_rejects_unexpected_column(tmp_path: Path) -> None:
     invalid = result.annotations.append_column("extra", pa.array([1, 2], type=pa.int8()))
 
     with pytest.raises(ManifestBuildError, match="schema mismatch"):
-        validate_annotation_table(invalid, result.samples, result.labels, result.image_dimensions)
+        validate_annotation_table(invalid, result.samples, result.labels)
 
 
 def test_label_schema_rejects_unexpected_column(tmp_path: Path) -> None:
@@ -477,14 +529,11 @@ def test_annotation_relationships_and_identifier_are_enforced(tmp_path: Path) ->
             negative_annotation,
             result.samples,
             result.labels,
-            result.image_dimensions,
         )
 
     invalid_id = _replace_table_row(result.annotations, 0, annotation_id="arbitrary")
     with pytest.raises(ManifestBuildError, match="deterministic annotation_id"):
-        validate_annotation_table(
-            invalid_id, result.samples, result.labels, result.image_dimensions
-        )
+        validate_annotation_table(invalid_id, result.samples, result.labels)
 
 
 def test_every_positive_sample_requires_an_annotation(tmp_path: Path) -> None:
@@ -492,7 +541,7 @@ def test_every_positive_sample_requires_an_annotation(tmp_path: Path) -> None:
     empty = pa.Table.from_pylist([], RSNA_ANNOTATION_SCHEMA)
 
     with pytest.raises(ManifestBuildError, match="Every positive sample"):
-        validate_annotation_table(empty, result.samples, result.labels, result.image_dimensions)
+        validate_annotation_table(empty, result.samples, result.labels)
 
 
 def test_sample_validation_accepts_multiple_samples_for_one_patient(tmp_path: Path) -> None:
@@ -549,6 +598,68 @@ def test_arrow_ipc_hashes_are_deterministic(tmp_path: Path) -> None:
     assert first.arrow_ipc_sha256[SAMPLES_FILENAME] == arrow_ipc_sha256(result.samples)
 
 
+def test_logical_hash_ignores_null_buffers_and_survives_parquet_round_trip(
+    tmp_path: Path,
+) -> None:
+    null_bitmap = pa.py_buffer(b"\x01")
+    first = pa.Array.from_buffers(
+        pa.int32(),
+        2,
+        [null_bitmap, pa.py_buffer((1).to_bytes(4, "little") + (7).to_bytes(4, "little"))],
+        null_count=1,
+    )
+    second = pa.Array.from_buffers(
+        pa.int32(),
+        2,
+        [null_bitmap, pa.py_buffer((1).to_bytes(4, "little") + (99).to_bytes(4, "little"))],
+        null_count=1,
+    )
+
+    assert first.to_pylist() == second.to_pylist() == [1, None]
+    first_table = pa.table({"value": first})
+    second_table = pa.table({"value": second})
+    path = tmp_path / "nulls.parquet"
+    pq.write_table(first_table, path)
+
+    expected = arrow_ipc_sha256(first_table)
+    assert expected == arrow_ipc_sha256(second_table)
+    assert expected == arrow_ipc_sha256(pq.read_table(path))
+
+
+def test_semantic_identity_is_independent_of_parquet_encoding(tmp_path: Path) -> None:
+    _, result = _tables(tmp_path)
+    zstd = tmp_path / "samples-zstd.parquet"
+    snappy = tmp_path / "samples-snappy.parquet"
+    pq.write_table(result.samples, zstd, compression="zstd")
+    pq.write_table(result.samples, snappy, compression="snappy")
+
+    assert sha256_file(zstd) != sha256_file(snappy)
+    zstd_samples = pq.read_table(zstd)
+    snappy_samples = pq.read_table(snappy)
+    zstd_sample_hash = arrow_ipc_sha256(zstd_samples)
+    snappy_sample_hash = arrow_ipc_sha256(snappy_samples)
+    assert zstd_sample_hash == snappy_sample_hash
+
+    zstd_logical_hashes = {
+        SAMPLES_FILENAME: zstd_sample_hash,
+        LABELS_FILENAME: arrow_ipc_sha256(result.labels),
+        ANNOTATIONS_FILENAME: arrow_ipc_sha256(result.annotations),
+        SPLITS_FILENAME: arrow_ipc_sha256(result.splits),
+        SOURCE_INVENTORY_FILENAME: arrow_ipc_sha256(result.source_inventory),
+    }
+    snappy_logical_hashes = {
+        SAMPLES_FILENAME: snappy_sample_hash,
+        LABELS_FILENAME: arrow_ipc_sha256(result.labels),
+        ANNOTATIONS_FILENAME: arrow_ipc_sha256(result.annotations),
+        SPLITS_FILENAME: arrow_ipc_sha256(result.splits),
+        SOURCE_INVENTORY_FILENAME: arrow_ipc_sha256(result.source_inventory),
+    }
+    assert zstd_logical_hashes == snappy_logical_hashes
+    assert _bundle_id(zstd_logical_hashes, result.metadata) == _bundle_id(
+        snappy_logical_hashes, result.metadata
+    )
+
+
 def test_bundle_id_ignores_nonsemantic_metadata(tmp_path: Path) -> None:
     _, result = _tables(tmp_path)
     changed = replace(
@@ -602,19 +713,17 @@ def test_bundle_validation_ignores_provenance_and_generation_changes(tmp_path: P
     assert load_current_bundle(output).bundle_id == original_id
 
 
-def test_bundle_id_changes_with_split_policy_and_artifact_hashes(tmp_path: Path) -> None:
+def test_bundle_id_uses_semantic_metadata_and_logical_artifact_hashes(tmp_path: Path) -> None:
     _, result = _tables(tmp_path)
     arrow_hashes = {"table": "arrow-a"}
-    file_hashes = {"table": "file-a"}
-    original = _bundle_id(arrow_hashes, file_hashes, result.metadata)
+    original = _bundle_id(arrow_hashes, result.metadata)
     changed_split = {
         **result.metadata,
         "split": {**result.metadata["split"], "seed": 43},
     }
 
-    assert _bundle_id(arrow_hashes, file_hashes, changed_split) != original
-    assert _bundle_id({"table": "arrow-b"}, file_hashes, result.metadata) != original
-    assert _bundle_id(arrow_hashes, {"table": "file-b"}, result.metadata) != original
+    assert _bundle_id(arrow_hashes, changed_split) != original
+    assert _bundle_id({"table": "arrow-b"}, result.metadata) != original
 
 
 def test_staging_failure_preserves_current_bundle(
@@ -628,13 +737,45 @@ def test_staging_failure_preserves_current_bundle(
     def fail_validation(*args: object, **kwargs: object) -> None:
         raise ManifestBuildError("staged validation failed")
 
-    monkeypatch.setattr(
-        "radfusion.data.rsna_artifacts._validate_parquet_round_trip", fail_validation
-    )
+    monkeypatch.setattr("radfusion.data.rsna_artifacts.validate_bundle_directory", fail_validation)
     with pytest.raises(ManifestBuildError, match="staged validation failed"):
         write_bundle(result, output)
     assert first.paths.current_path.read_text(encoding="utf-8") == current_before
-    assert load_current_bundle(output).bundle_id == first.paths.bundle_id
+    validate_bundle_directory(
+        first.paths.bundle_directory,
+        expected_bundle_id=first.paths.bundle_id,
+    )
+
+
+def test_new_bundle_is_validated_once_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, result = _tables(tmp_path)
+    calls: list[tuple[Path, bool]] = []
+
+    def record_validation(
+        directory: str | Path,
+        *,
+        expected_bundle_id: str | None = None,
+        enforce_directory_name: bool = True,
+    ) -> dict[str, object]:
+        calls.append((Path(directory), enforce_directory_name))
+        return validate_bundle_directory(
+            directory,
+            expected_bundle_id=expected_bundle_id,
+            enforce_directory_name=enforce_directory_name,
+        )
+
+    monkeypatch.setattr(
+        "radfusion.data.rsna_artifacts.validate_bundle_directory",
+        record_validation,
+    )
+    written = write_bundle(result, tmp_path / "manifests")
+
+    assert len(calls) == 1
+    assert calls[0][1] is False
+    load_current_bundle(tmp_path / "manifests")
+    assert calls[-1] == (written.paths.bundle_directory, True)
 
 
 def test_consumer_rejects_bundle_with_hash_mismatch(tmp_path: Path) -> None:
@@ -736,6 +877,25 @@ def test_source_inventory_authenticates_every_dicom_and_detects_tampering(tmp_pa
         load_current_bundle(tmp_path / "manifests")
 
 
+def test_portable_bundle_validation_does_not_access_external_dicoms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, result = _tables(tmp_path)
+    written = write_bundle(result, tmp_path / "manifests")
+
+    def reject_external_access(*args: object, **kwargs: object) -> Path:
+        raise AssertionError("portable validation accessed the external dataset")
+
+    monkeypatch.setattr(
+        "radfusion.data.rsna_artifacts.resolve_image_path",
+        reject_external_access,
+    )
+    validate_bundle_directory(
+        written.paths.bundle_directory,
+        expected_bundle_id=written.paths.bundle_id,
+    )
+
+
 def test_consumer_rejects_metadata_that_does_not_match_bundle_id(tmp_path: Path) -> None:
     _, result = _tables(tmp_path)
     output = tmp_path / "manifests"
@@ -747,6 +907,47 @@ def test_consumer_rejects_metadata_that_does_not_match_bundle_id(tmp_path: Path)
     )
 
     with pytest.raises(ManifestBuildError, match="Bundle ID"):
+        load_current_bundle(output)
+
+
+@pytest.mark.parametrize(
+    "invalid_form",
+    [
+        "dictionary-ratios",
+        "reordered-ratios",
+        "duplicate-split-name",
+        "cohort-fingerprint",
+        "unknown-field",
+    ],
+)
+def test_consumer_rejects_noncanonical_split_metadata(
+    tmp_path: Path,
+    invalid_form: str,
+) -> None:
+    _, result = _tables(tmp_path)
+    output = tmp_path / "manifests"
+    written = write_bundle(result, output)
+    metadata = json.loads(written.paths.metadata_path.read_text(encoding="utf-8"))
+    split = metadata["split"]
+    if invalid_form == "dictionary-ratios":
+        split["ratios"] = {"train": 0.7, "validation": 0.15, "test": 0.15}
+    elif invalid_form == "reordered-ratios":
+        split["ratios"] = [split["ratios"][0], split["ratios"][2], split["ratios"][1]]
+    elif invalid_form == "duplicate-split-name":
+        split["ratios"][1]["split_name"] = "train"
+    elif invalid_form == "cohort-fingerprint":
+        split["cohort_fingerprint"] = "legacy"
+    else:
+        split["unexpected"] = "legacy"
+    written.paths.metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ManifestBuildError,
+        match="split metadata fields|ordered split ratios",
+    ):
         load_current_bundle(output)
 
 
@@ -774,10 +975,38 @@ def test_cli_success_and_failure_exit_codes(tmp_path: Path) -> None:
         == "feasible-minimum-then-largest-remainder-canonical-tiebreak"
     )
     assert metadata["split"]["seed"] == 42
-    assert metadata["split"]["ratios"] == {"train": 0.7, "validation": 0.15, "test": 0.15}
+    assert metadata["split"]["ratios"] == [
+        {"split_name": "train", "ratio": 0.7},
+        {"split_name": "validation", "ratio": 0.15},
+        {"split_name": "test", "ratio": 0.15},
+    ]
     assert metadata["split"]["split_recipe_id"].startswith("split-recipe-")
-    assert metadata["split"]["cohort_fingerprint"].startswith("cohort-")
     assert metadata["split"]["split_assignment_id"].startswith("split-assignment-")
+    assert set(metadata["split"]) == {
+        "split_source",
+        "split_recipe_id",
+        "split_assignment_id",
+        "algorithm_version",
+        "patient_grouping_rule",
+        "patient_target_consistency_rule",
+        "ranking_rule",
+        "patient_hash_algorithm",
+        "patient_hash_input_encoding",
+        "patient_hash_input_template",
+        "seed",
+        "stratification_target",
+        "allocation_rule",
+        "split_order",
+        "ratios",
+    }
+    for derived_field in (
+        "sex_distribution",
+        "view_distribution",
+        "pixel_spacing_summary",
+        "rsna_class_distribution",
+        "image_dimensions_summary",
+    ):
+        assert derived_field not in metadata
     assert metadata["source_inventory_count"] == 2
     assert SOURCE_INVENTORY_FILENAME in metadata["generated_artifact_hashes"]
     assert metadata["provenance"]["arrow_ipc_runtime"]["pyarrow_version"] == pa.__version__
@@ -788,39 +1017,41 @@ def test_cli_success_and_failure_exit_codes(tmp_path: Path) -> None:
     assert main(["--dataset-root", str(tmp_path / "missing")]) == 1
 
 
-@pytest.mark.integration
-def test_real_rsna_aggregate_contract() -> None:
+@pytest.fixture(scope="session")
+def real_rsna_build() -> BuildResult:
     root = Path("data/raw/rsna/extracted")
     if not (root / "stage_2_train_images").is_dir():
         pytest.skip("Local RSNA data is not available")
+    return build_rsna_artifacts(root)
 
-    result = build_rsna_artifacts(root)
 
-    assert result.samples.num_rows == 26_684
-    assert result.labels.num_rows == 53_368
-    assert result.annotations.num_rows == 9_555
+@pytest.mark.integration
+def test_real_rsna_aggregate_contract(real_rsna_build: BuildResult) -> None:
+    assert real_rsna_build.samples.num_rows == 26_684
+    assert real_rsna_build.labels.num_rows == 53_368
+    assert real_rsna_build.annotations.num_rows == 9_555
     targets = Counter(
         row["label_value"]
-        for row in result.labels.to_pylist()
+        for row in real_rsna_build.labels.to_pylist()
         if row["task_id"] == PNEUMONIA_TASK_ID
     )
     assert targets == {0: 20_672, 1: 6_012}
 
 
 @pytest.mark.integration
-def test_real_rsna_audit_reports_are_aggregate(tmp_path: Path) -> None:
-    root = Path("data/raw/rsna/extracted")
-    if not (root / "stage_2_train_images").is_dir():
-        pytest.skip("Local RSNA data is not available")
+def test_real_rsna_audit_reports_are_aggregate(
+    tmp_path: Path, real_rsna_build: BuildResult
+) -> None:
     output = tmp_path / "manifests"
-    write_bundle(build_rsna_artifacts(root), output)
+    written = write_bundle(real_rsna_build, output)
 
     report_directory = tmp_path / "reports" / "rsna"
     summary = generate_rsna_audit(output, report_directory)
 
-    assert set(path.name for path in report_directory.iterdir()) == set(REPORT_FILENAMES)
+    audit_directory = report_directory / written.paths.bundle_id
+    assert set(path.name for path in audit_directory.iterdir()) == set(REPORT_FILENAMES)
     assert summary["reports"] == list(REPORT_FILENAMES)
-    sample_rows = build_rsna_artifacts(root).samples.slice(0, 10).to_pylist()
+    sample_rows = real_rsna_build.samples.slice(0, 10).to_pylist()
     source_values = {
         str(row[field])
         for row in sample_rows
@@ -828,4 +1059,4 @@ def test_real_rsna_audit_reports_are_aggregate(tmp_path: Path) -> None:
     }
     source_values.update(Path(row["image_path"]).name for row in sample_rows)
     source_values.update(Path(row["image_path"]).stem for row in sample_rows)
-    validate_public_reports(report_directory.iterdir(), forbidden_source_values=source_values)
+    validate_public_reports(audit_directory.iterdir(), forbidden_source_values=source_values)

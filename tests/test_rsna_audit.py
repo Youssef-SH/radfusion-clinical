@@ -18,7 +18,7 @@ from radfusion.data.rsna_audit import (
     generate_rsna_audit,
 )
 from radfusion.data.schemas import RSNA_LABEL_SCHEMA, RSNA_SAMPLE_SCHEMA, RSNA_SPLIT_SCHEMA
-from radfusion.data.splitting import SplitConfig, cohort_fingerprint, split_assignment_id
+from radfusion.data.splitting import SplitConfig, split_assignment_id
 
 
 def _audit_bundle(tmp_path: Path) -> SimpleNamespace:
@@ -32,14 +32,14 @@ def _audit_bundle(tmp_path: Path) -> SimpleNamespace:
             sample_id = f"rsna:{name}"
             samples.append(
                 {
-                    "dataset_id": "rsna",
                     "sample_id": sample_id,
                     "patient_id": name,
-                    "study_id": None,
                     "image_id": name,
                     "image_path": f"stage_2_train_images/{name}.dcm",
-                    "split": None,
+                    "image_rows": 1024,
+                    "image_columns": 1024,
                     "age_years": float(40 + split_index),
+                    "age_is_implausible": False,
                     "sex": "F" if target else "M",
                     "view_position": "PA",
                     "pixel_spacing_row_mm": 0.168,
@@ -48,13 +48,9 @@ def _audit_bundle(tmp_path: Path) -> SimpleNamespace:
             )
             labels.append(
                 {
-                    "dataset_id": "rsna",
                     "sample_id": sample_id,
                     "task_id": "pneumonia",
                     "label_value": target,
-                    "label_status": "observed",
-                    "label_source": "rsna-stage-2-challenge-target",
-                    "label_policy_version": "rsna-stage-2-target-v1",
                 }
             )
             splits.append({"sample_id": sample_id, "split_name": split_name})
@@ -79,24 +75,10 @@ def _audit_bundle(tmp_path: Path) -> SimpleNamespace:
     pq.write_table(label_table, paths["labels_path"])
     pq.write_table(pa.Table.from_pylist(annotations), paths["annotations_path"])
     recipe_id = SplitConfig().recipe_id
-    cohort_id = cohort_fingerprint(sample_table, label_table)
     assignments = {row["sample_id"]: row["split_name"] for row in splits}
-    assignment_id = split_assignment_id(recipe_id, cohort_id, assignments)
-    split_rows = [
-        {
-            "dataset_id": "rsna",
-            **row,
-            "split_recipe_id": recipe_id,
-            "cohort_fingerprint": cohort_id,
-            "split_assignment_id": assignment_id,
-            "split_source": "generated:patient-stratified-pneumonia",
-        }
-        for row in splits
-    ]
+    assignment_id = split_assignment_id(assignments)
     pq.write_table(
-        pa.Table.from_pylist(
-            sorted(split_rows, key=lambda row: row["sample_id"]), RSNA_SPLIT_SCHEMA
-        ),
+        pa.Table.from_pylist(sorted(splits, key=lambda row: row["sample_id"]), RSNA_SPLIT_SCHEMA),
         paths["splits_path"],
     )
     paths["metadata_path"].write_text(
@@ -105,7 +87,6 @@ def _audit_bundle(tmp_path: Path) -> SimpleNamespace:
                 "implausible_age_count": 0,
                 "split": {
                     "split_recipe_id": recipe_id,
-                    "cohort_fingerprint": cohort_id,
                     "split_assignment_id": assignment_id,
                 },
             }
@@ -135,6 +116,7 @@ def test_label_distribution_uses_task_specific_names() -> None:
         "age_distribution.csv",
         "sex_distribution.csv",
         "view_distribution.csv",
+        "image_dimensions.csv",
         "pixel_spacing.csv",
         "bbox_statistics.csv",
         "missingness_report.md",
@@ -204,20 +186,21 @@ def test_bbox_statistics_handles_scope_without_positive_samples() -> None:
     assert first.getvalue() == second.getvalue()
 
 
-def test_audit_publication_replaces_complete_output_and_preserves_directories(
+def test_audit_publication_owns_only_the_bundle_specific_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bundle = _audit_bundle(tmp_path)
     monkeypatch.setattr("radfusion.data.rsna_audit.load_current_bundle", lambda _: bundle)
     output = tmp_path / "reports" / "rsna"
-    (output / "models").mkdir(parents=True)
-    (output / "models" / "keep.txt").write_text("model", encoding="utf-8")
-    (output / "stale.txt").write_text("stale", encoding="utf-8")
+    other_bundle = output / "build-other"
+    other_bundle.mkdir(parents=True)
+    (other_bundle / "keep.txt").write_text("other", encoding="utf-8")
 
     generate_rsna_audit(tmp_path / "manifests", output)
 
-    assert {path.name for path in output.iterdir() if path.is_file()} == set(REPORT_FILENAMES)
-    assert (output / "models" / "keep.txt").read_text(encoding="utf-8") == "model"
+    destination = output / bundle.bundle_id
+    assert {path.name for path in destination.iterdir()} == set(REPORT_FILENAMES)
+    assert (other_bundle / "keep.txt").read_text(encoding="utf-8") == "other"
     assert not list(output.parent.glob(".rsna-staging-*"))
     assert not list(output.parent.glob(".rsna-backup-*"))
 
@@ -232,12 +215,13 @@ def test_audit_failure_preserves_previous_output(
         lambda _: (_ for _ in ()).throw(RuntimeError("report failed")),
     )
     output = tmp_path / "reports" / "rsna"
-    output.mkdir(parents=True)
-    (output / "previous.txt").write_text("complete", encoding="utf-8")
+    destination = output / bundle.bundle_id
+    destination.mkdir(parents=True)
+    (destination / "previous.txt").write_text("complete", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="report failed"):
         generate_rsna_audit(tmp_path / "manifests", output)
 
-    assert (output / "previous.txt").read_text(encoding="utf-8") == "complete"
-    assert not list(output.parent.glob(".rsna-staging-*"))
-    assert not list(output.parent.glob(".rsna-backup-*"))
+    assert (destination / "previous.txt").read_text(encoding="utf-8") == "complete"
+    assert not list(output.glob(".build-test-staging-*"))
+    assert not list(output.glob(".build-test-backup-*"))

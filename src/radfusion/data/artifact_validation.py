@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
 import pyarrow as pa
@@ -21,21 +20,13 @@ from radfusion.data.rsna_source import (
     resolve_image_path,
 )
 from radfusion.data.schemas import (
-    DATASET_ID,
-    PNEUMONIA_LABEL_POLICY_VERSION,
-    PNEUMONIA_LABEL_SOURCE,
     PNEUMONIA_TASK_ID,
     RSNA_ANNOTATION_SCHEMA,
-    RSNA_CLASS_LABEL_POLICY_VERSION,
-    RSNA_CLASS_LABEL_SOURCE,
     RSNA_CLASS_TASK_ID,
     RSNA_LABEL_SCHEMA,
     RSNA_SAMPLE_SCHEMA,
     require_exact_schema,
 )
-
-ALLOWED_SPLITS = {"train", "validation", "test"}
-LABEL_STATUS_OBSERVED = "observed"
 
 
 def validate_sample_table(samples: pa.Table, dataset_root: str | Path | None = None) -> None:
@@ -55,16 +46,17 @@ def validate_sample_table(samples: pa.Table, dataset_root: str | Path | None = N
 
     root = Path(dataset_root).resolve() if dataset_root is not None else None
     for row in rows:
-        if row["dataset_id"] != DATASET_ID:
-            raise ManifestBuildError("dataset_id must be 'rsna'")
         if not row["patient_id"] or not row["image_id"]:
             raise ManifestBuildError("patient_id and image_id must be non-null and non-empty")
         if row["sample_id"] != f"rsna:{row['image_id']}":
             raise ManifestBuildError("RSNA sample_id must be 'rsna:<image_id>'")
-        if row["study_id"] is not None:
-            raise ManifestBuildError("RSNA study_id must be null; no study grouping is fabricated")
-        if row["split"] is not None and row["split"] not in ALLOWED_SPLITS:
-            raise ManifestBuildError(f"Invalid split value: {row['split']!r}")
+        if row["image_rows"] <= 0 or row["image_columns"] <= 0:
+            raise ManifestBuildError("image_rows and image_columns must be positive")
+        age = row["age_years"]
+        if age is not None and not math.isfinite(age):
+            raise ManifestBuildError("age_years must be finite when present")
+        if row["age_is_implausible"] != (age is not None and (age < 0.0 or age > 120.0)):
+            raise ManifestBuildError("age_is_implausible does not match age_years")
         if row["sex"] is not None and row["sex"] not in ALLOWED_SEX:
             raise ManifestBuildError(f"Invalid sex value: {row['sex']!r}")
         if row["view_position"] is not None and row["view_position"] not in ALLOWED_VIEW_POSITIONS:
@@ -81,7 +73,7 @@ def validate_sample_table(samples: pa.Table, dataset_root: str | Path | None = N
 
 
 def validate_label_table(labels: pa.Table, samples: pa.Table) -> None:
-    """Validate task-label cardinality, provenance, domains, and source compatibility."""
+    """Validate task-label cardinality, domains, and source compatibility."""
     _require_schema(labels, RSNA_LABEL_SCHEMA, "RSNA labels")
     sample_ids = set(samples.column("sample_id").to_pylist())
     rows = labels.to_pylist()
@@ -95,28 +87,18 @@ def validate_label_table(labels: pa.Table, samples: pa.Table) -> None:
     for row in rows:
         sample_id = row["sample_id"]
         task_id = row["task_id"]
-        if row["dataset_id"] != DATASET_ID:
-            raise ManifestBuildError("Label dataset_id must be 'rsna'")
         if sample_id not in sample_ids:
             raise ManifestBuildError(f"Label references unknown sample_id {sample_id!r}")
-        if row["label_status"] != LABEL_STATUS_OBSERVED:
-            raise ManifestBuildError("RSNA labels must have label_status='observed'")
         if task_id == PNEUMONIA_TASK_ID:
-            _validate_label_provenance(
-                row,
-                values={0, 1},
-                source=PNEUMONIA_LABEL_SOURCE,
-                policy=PNEUMONIA_LABEL_POLICY_VERSION,
-            )
+            values = {0, 1}
         elif task_id == RSNA_CLASS_TASK_ID:
-            _validate_label_provenance(
-                row,
-                values=set(RSNA_CLASS_VALUES.values()),
-                source=RSNA_CLASS_LABEL_SOURCE,
-                policy=RSNA_CLASS_LABEL_POLICY_VERSION,
-            )
+            values = set(RSNA_CLASS_VALUES.values())
         else:
             raise ManifestBuildError(f"Unexpected task_id {task_id!r}")
+        if row["label_value"] not in values:
+            raise ManifestBuildError(
+                f"Invalid label_value {row['label_value']!r} for task {task_id!r}"
+            )
         by_sample.setdefault(sample_id, {})[task_id] = row["label_value"]
 
     if set(by_sample) != sample_ids:
@@ -152,13 +134,15 @@ def validate_annotation_table(
     annotations: pa.Table,
     samples: pa.Table,
     labels: pa.Table,
-    image_dimensions: Mapping[str, tuple[int, int]] | None = None,
 ) -> None:
     """Validate annotation relationships, geometry, identifiers, and ordering."""
     _require_schema(annotations, RSNA_ANNOTATION_SCHEMA, "RSNA annotations")
     sample_rows = samples.to_pylist()
     sample_ids = {row["sample_id"] for row in sample_rows}
     sample_images = {row["sample_id"]: row["image_id"] for row in sample_rows}
+    image_dimensions = {
+        row["sample_id"]: (row["image_rows"], row["image_columns"]) for row in sample_rows
+    }
     targets = pneumonia_targets(labels)
     if set(targets) != sample_ids:
         raise ManifestBuildError(
@@ -177,8 +161,6 @@ def validate_annotation_table(
     seen_boxes: set[tuple[str, float, float, float, float]] = set()
     for row in rows:
         sample_id = row["sample_id"]
-        if row["dataset_id"] != DATASET_ID:
-            raise ManifestBuildError("Annotation dataset_id must be 'rsna'")
         if sample_id not in sample_ids:
             raise ManifestBuildError(f"Annotation references unknown sample_id {sample_id!r}")
         if targets[sample_id] != 1:
@@ -198,15 +180,9 @@ def validate_annotation_table(
         x, y, width, height = coordinates
         if x < 0 or y < 0 or width <= 0 or height <= 0:
             raise ManifestBuildError(f"Annotation {row['annotation_id']!r} has invalid geometry")
-        if image_dimensions is not None:
-            dimensions = image_dimensions.get(sample_id)
-            if dimensions is None:
-                raise ManifestBuildError(f"Missing image dimensions for sample {sample_id!r}")
-            image_rows, image_columns = dimensions
-            if x + width > image_columns or y + height > image_rows:
-                raise ManifestBuildError(
-                    f"Annotation {row['annotation_id']!r} exceeds image bounds"
-                )
+        image_rows, image_columns = image_dimensions[sample_id]
+        if x + width > image_columns or y + height > image_rows:
+            raise ManifestBuildError(f"Annotation {row['annotation_id']!r} exceeds image bounds")
         box_key = (sample_id, x, y, width, height)
         if box_key in seen_boxes:
             raise ManifestBuildError(f"Duplicate bounding box for sample {sample_id!r}")
@@ -218,17 +194,6 @@ def validate_annotation_table(
             f"Every positive sample must have annotations; missing {len(missing)} "
             f"(examples: {missing[:10]})"
         )
-
-
-def _validate_label_provenance(
-    row: dict[str, object], *, values: set[int], source: str, policy: str
-) -> None:
-    if row["label_value"] not in values:
-        raise ManifestBuildError(
-            f"Invalid label_value {row['label_value']!r} for task {row['task_id']!r}"
-        )
-    if row["label_source"] != source or row["label_policy_version"] != policy:
-        raise ManifestBuildError(f"Invalid label provenance for task {row['task_id']!r}")
 
 
 def _require_schema(table: pa.Table, expected: pa.Schema, artifact_name: str) -> None:

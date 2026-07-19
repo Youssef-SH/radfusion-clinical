@@ -9,7 +9,7 @@ import pyarrow.parquet as pq
 
 from radfusion.data.rsna_artifacts import load_current_bundle
 from radfusion.data.rsna_source import ManifestBuildError
-from radfusion.data.splitting import SPLIT_NAMES, validate_split_table
+from radfusion.data.splitting import SPLIT_NAMES
 from radfusion.training.config import DatasetConfig
 from radfusion.training.interfaces import DatasetRunData
 
@@ -23,7 +23,6 @@ class RsnaDataset:
         samples = pq.read_table(bundle.samples_path)
         labels = pq.read_table(bundle.labels_path)
         splits = pq.read_table(bundle.splits_path)
-        validate_split_table(splits, samples, labels)
         metadata = json.loads(bundle.metadata_path.read_text(encoding="utf-8"))
         frame = _training_frame(
             samples.to_pandas(), labels.to_pandas(), splits.to_pandas(), config.task_id
@@ -32,10 +31,9 @@ class RsnaDataset:
         return DatasetRunData(
             frame=frame,
             bundle_id=bundle.bundle_id,
-            split_recipe_id=str(frame["split_recipe_id"].iloc[0]),
-            cohort_fingerprint=str(frame["cohort_fingerprint"].iloc[0]),
-            split_assignment_id=str(frame["split_assignment_id"].iloc[0]),
-            label_policy_version=str(metadata["label_policy_versions"][config.task_id]),
+            split_recipe_id=str(metadata["split"]["split_recipe_id"]),
+            split_assignment_id=str(metadata["split"]["split_assignment_id"]),
+            label_policy_version=str(metadata["tasks"][config.task_id]["label_policy_version"]),
         )
 
 
@@ -44,15 +42,7 @@ def _training_frame(
 ) -> pd.DataFrame:
     target = labels.loc[labels["task_id"] == task_id, ["sample_id", "label_value"]]
     target = target.rename(columns={"label_value": "target"})
-    assignments = splits[
-        [
-            "sample_id",
-            "split_name",
-            "split_recipe_id",
-            "cohort_fingerprint",
-            "split_assignment_id",
-        ]
-    ]
+    assignments = splits[["sample_id", "split_name"]]
     return (
         samples.merge(assignments, on="sample_id", validate="one_to_one")
         .merge(target, on="sample_id", validate="one_to_one")
@@ -64,9 +54,6 @@ def _training_frame(
 def _validate_training_frame(frame: pd.DataFrame) -> None:
     if set(frame["split_name"]) != set(SPLIT_NAMES):
         raise ManifestBuildError("Training requires train, validation, and test splits")
-    for field in ("split_recipe_id", "cohort_fingerprint", "split_assignment_id"):
-        if frame[field].nunique() != 1:
-            raise ManifestBuildError(f"Training requires exactly one {field}")
     for split_name in SPLIT_NAMES:
         targets = set(frame.loc[frame["split_name"] == split_name, "target"])
         if targets != {0, 1}:

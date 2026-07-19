@@ -53,8 +53,8 @@ to microbiologically confirmed clinical pneumonia.
 
 The labeled cohort receives a deterministic 70/15/15 train, validation, and test assignment,
 stratified on the pneumonia target at the patient level with seed 42. The split artifact is part of
-the validated bundle. Its recipe ID, cohort fingerprint, and assignment ID bind the policy,
-population, and exact sample mapping. Audit reports contain aggregate counts only.
+the validated bundle. The manifest records the recipe and exact assignment identities. Audit
+reports contain aggregate counts only.
 
 ## DICOM characteristics
 
@@ -67,9 +67,9 @@ All 26,684 labeled headers were read with pixel decoding disabled. Verified aggr
 - F or M patient sex
 - 18 distinct pixel-spacing pairs
 
-Patient age, sex, projection, and pixel spacing enter the sample artifact. Image dimensions,
-photometric interpretation, transfer syntax, bit depth, compression, modality, body part, and UID
-consistency are aggregate audit fields.
+Patient age, sex, projection, pixel spacing, and image dimensions enter the sample artifact.
+Photometric interpretation, transfer syntax, bit depth, compression, modality, body part, and UID
+consistency are source-quality evidence.
 
 The bundle authenticates each source CSV and DICOM file by SHA-256. Metadata models consume
 validated DICOM header fields. SOP Instance UID is required and unique across labeled samples.
@@ -82,4 +82,5 @@ only within the internal patient-disjoint RSNA challenge holdout.
 
 RSNA age values use bare integers interpreted as years under a compatibility rule. Standard DICOM
 day, week, month, and year forms are also supported. The bundle preserves five observed values
-above 120 years and counts them as implausible.
+above 120 years and marks them as implausible. Missing and malformed values remain distinct
+source-quality outcomes and produce null sample ages.

@@ -21,7 +21,6 @@ class DatasetRunData:
     frame: pd.DataFrame
     bundle_id: str
     split_recipe_id: str
-    cohort_fingerprint: str
     split_assignment_id: str
     label_policy_version: str
 

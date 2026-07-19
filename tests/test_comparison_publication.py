@@ -34,7 +34,6 @@ def _lineage() -> dict[str, object]:
         "bundle_id": "bundle",
         "split_assignment_id": "assignment",
         "split_recipe_id": "recipe",
-        "cohort_fingerprint": "cohort",
         "git_commit": "commit",
         "git_dirty": False,
         "git_source_state_sha256": "clean",
