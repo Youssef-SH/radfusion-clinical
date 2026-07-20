@@ -5,20 +5,19 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
+import yaml
 
 from radfusion.training.config import ConfigError, load_experiment_config
 
 
-def test_executable_configs_load_as_immutable_typed_values() -> None:
+def test_supported_configs_load_as_immutable_typed_values() -> None:
     logistic = load_experiment_config("configs/metadata_logistic.yaml")
     lightgbm = load_experiment_config("configs/metadata_lightgbm.yaml")
 
-    assert logistic.executable is True
     assert logistic.dataset.registry_key == "rsna"
+    assert logistic.dataset.bundle_id.startswith("build-")
     assert logistic.model.registry_key == "metadata_logistic"
-    assert logistic.model.class_weighting == "balanced"
     assert "class_weight" not in logistic.model.parameters
-    assert logistic.training.require_clean_git is True
     assert lightgbm.model.registry_key == "metadata_lightgbm"
     assert lightgbm.model.fit_parameters["early_stopping_rounds"] == 50
     assert lightgbm.evaluation.latency_measured_calls == 1_000
@@ -61,21 +60,14 @@ def test_unknown_nested_config_fields_are_rejected(tmp_path: Path) -> None:
         load_experiment_config(path)
 
 
-@pytest.mark.parametrize("output_name", ["../escape", "a/b", "a\\b", ".", "..", "/absolute"])
-def test_generated_output_name_must_be_one_safe_path_component(
-    tmp_path: Path, output_name: str
-) -> None:
-    content = Path("configs/metadata_logistic.yaml").read_text(encoding="utf-8")
-    path = tmp_path / "unsafe-output.yaml"
-    path.write_text(
-        content.replace(
-            "  output_name: metadata_logistic_regression",
-            f"  output_name: {output_name!r}",
-        ),
-        encoding="utf-8",
-    )
+@pytest.mark.parametrize("bundle_id", ["../escape", "a/b", "a\\b", ".", "..", "/absolute"])
+def test_bundle_id_must_be_one_safe_path_component(tmp_path: Path, bundle_id: str) -> None:
+    document = yaml.safe_load(Path("configs/metadata_logistic.yaml").read_text(encoding="utf-8"))
+    document["dataset"]["bundle_id"] = bundle_id
+    path = tmp_path / "unsafe-bundle.yaml"
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
-    with pytest.raises(ConfigError, match="model.output_name.*safe path component"):
+    with pytest.raises(ConfigError, match="dataset.bundle_id.*safe path component"):
         load_experiment_config(path)
 
 

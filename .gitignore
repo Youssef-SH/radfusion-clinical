@@ -38,8 +38,10 @@ data/manifests/**
 
 # Models and experiment artifacts
 /models/
-/mlruns/
 /mlartifacts/
+/mlflow.db
+/mlflow.db-wal
+/mlflow.db-shm
 
 # Secrets
 kaggle.json

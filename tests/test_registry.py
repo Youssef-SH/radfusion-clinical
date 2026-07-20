@@ -2,44 +2,22 @@ from __future__ import annotations
 
 import pytest
 
-from radfusion.training.registry import (
-    DATASET_REGISTRY,
-    MODEL_REGISTRY,
-    Registry,
-    RegistryError,
-    register_builtin_components,
+from radfusion.training.registry import DATASETS, MODELS, RegistryError, get_dataset, get_model
+
+
+def test_builtin_component_mappings_are_immutable_and_complete() -> None:
+    assert tuple(DATASETS) == ("rsna",)
+    assert tuple(MODELS) == ("metadata_logistic", "metadata_lightgbm")
+    assert get_dataset("rsna") is DATASETS["rsna"]
+    assert get_model("metadata_logistic") is MODELS["metadata_logistic"]
+    with pytest.raises(TypeError):
+        DATASETS["other"] = object()  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("lookup", "message"),
+    [(get_dataset, "dataset"), (get_model, "model")],
 )
-
-
-def test_registry_resolves_registered_implementation() -> None:
-    registry: Registry[object] = Registry("test")
-    implementation = object()
-
-    registry.register("example", implementation)
-
-    assert registry.get("example") is implementation
-    assert registry.keys() == ("example",)
-
-
-def test_registry_rejects_duplicate_and_unknown_keys() -> None:
-    registry: Registry[object] = Registry("test")
-    registry.register("example", object())
-
-    with pytest.raises(RegistryError, match="already registered"):
-        registry.register("example", object())
-    with pytest.raises(RegistryError, match="Unknown test registry key"):
-        registry.get("missing")
-
-
-def test_current_dataset_and_model_implementations_are_registered() -> None:
-    register_builtin_components()
-    assert DATASET_REGISTRY.keys() == ("rsna",)
-    assert MODEL_REGISTRY.keys() == ("metadata_lightgbm", "metadata_logistic")
-
-
-def test_builtin_registration_is_idempotent() -> None:
-    register_builtin_components()
-    register_builtin_components()
-
-    assert DATASET_REGISTRY.keys() == ("rsna",)
-    assert MODEL_REGISTRY.keys() == ("metadata_lightgbm", "metadata_logistic")
+def test_unknown_builtin_component_keys_fail(lookup, message: str) -> None:
+    with pytest.raises(RegistryError, match=message):
+        lookup("missing")

@@ -1,12 +1,9 @@
-"""Configure lightweight local MLflow experiment tracking."""
+"""Configure local SQLite-backed MLflow experiment tracking."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import platform
-import shutil
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -20,29 +17,42 @@ import numpy
 import pyarrow
 import sklearn
 import skops
+from mlflow.tracking import MlflowClient
 
 from radfusion.data.hashing import sha256_file
 
-_SOURCE_ROOTS = ("src/", "tests/", "configs/", "docs/")
-_SOURCE_FILES = {
-    "AGENTS.md",
-    "README.md",
-    "Makefile",
-    "pyproject.toml",
-    "uv.lock",
-    ".gitignore",
-    ".pre-commit-config.yaml",
-}
+DEFAULT_TRACKING_URI = "sqlite:///mlflow.db"
+MLFLOW_ARTIFACT_DIRECTORY = "mlartifacts"
 
 
-def configure_mlflow(*, experiment_name: str, tracking_directory: str | Path = "mlruns") -> None:
-    """Configure a local file-backed MLflow experiment."""
-    tracking_root = Path(tracking_directory).resolve()
-    tracking_root.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING", "false")
-    os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
-    mlflow.set_tracking_uri(tracking_root.as_uri())
-    mlflow.set_experiment(experiment_name)
+def configure_mlflow(
+    *,
+    tracking_uri: str = DEFAULT_TRACKING_URI,
+    experiment_name: str | None = None,
+) -> MlflowClient:
+    """Initialize one SQLite backend and optionally select an experiment."""
+    resolved_uri, database_path = _resolve_sqlite_tracking_uri(tracking_uri)
+    mlflow.set_tracking_uri(resolved_uri)
+    client = MlflowClient(tracking_uri=resolved_uri)
+    if experiment_name is None:
+        return client
+
+    artifact_location = (database_path.parent / MLFLOW_ARTIFACT_DIRECTORY).resolve().as_uri()
+    experiment = client.get_experiment_by_name(experiment_name)
+    if experiment is None:
+        experiment_id = client.create_experiment(
+            experiment_name,
+            artifact_location=artifact_location,
+        )
+    else:
+        if experiment.artifact_location != artifact_location:
+            raise ValueError(
+                f"MLflow experiment {experiment_name!r} uses artifact location "
+                f"{experiment.artifact_location!r}, expected {artifact_location!r}"
+            )
+        experiment_id = experiment.experiment_id
+    mlflow.set_experiment(experiment_id=experiment_id)
+    return client
 
 
 @contextmanager
@@ -84,56 +94,6 @@ def uv_lock_sha256(path: str | Path = "uv.lock") -> str:
     if not lock.is_file():
         raise FileNotFoundError(f"Dependency lock is missing: {lock}")
     return sha256_file(lock)
-
-
-def write_dirty_source_snapshot(destination: str | Path) -> Path:
-    """Archive the tracked diff and relevant nonignored untracked source files."""
-    output = Path(destination)
-    output.mkdir(parents=True, exist_ok=False)
-    diff = subprocess.run(
-        ["git", "diff", "--binary", "HEAD"],
-        check=True,
-        capture_output=True,
-    ).stdout
-    (output / "tracked.diff").write_bytes(diff)
-    untracked_output = output / "untracked"
-    paths = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-        check=True,
-        capture_output=True,
-    ).stdout.split(b"\0")
-    archived: dict[str, str] = {}
-    for raw_path in sorted(paths):
-        if not raw_path:
-            continue
-        path_text = raw_path.decode("utf-8")
-        if not (_is_source_path(path_text)):
-            continue
-        source = Path(path_text)
-        if not source.is_file() or source.is_symlink():
-            continue
-        target = untracked_output / source
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-        archived[path_text] = sha256_file(target)
-    identity = {
-        "tracked_diff_sha256": sha256_file(output / "tracked.diff"),
-        "untracked_file_sha256": archived,
-    }
-    source_state_sha256 = hashlib.sha256(
-        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    manifest = {
-        "git_commit": git_revision()[0],
-        **identity,
-        "untracked_files": sorted(archived),
-        "source_state_sha256": source_state_sha256,
-    }
-    (output / "snapshot_manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return output
 
 
 def environment_provenance() -> dict[str, str]:
@@ -192,5 +152,15 @@ def _parameter_value(value: Any) -> str | float | int | bool:
     return str(value)
 
 
-def _is_source_path(path: str) -> bool:
-    return path in _SOURCE_FILES or path.startswith(_SOURCE_ROOTS)
+def _resolve_sqlite_tracking_uri(tracking_uri: str) -> tuple[str, Path]:
+    prefix = "sqlite:///"
+    if not isinstance(tracking_uri, str) or not tracking_uri.startswith(prefix):
+        raise ValueError("MLflow tracking URI must use a local sqlite:/// database")
+    database_text = tracking_uri[len(prefix) :]
+    if not database_text or database_text == ":memory:" or "?" in database_text:
+        raise ValueError("MLflow tracking URI must name a persistent local SQLite database")
+    database_path = Path(database_text)
+    if not database_path.is_absolute():
+        database_path = database_path.resolve()
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    return f"{prefix}{database_path.as_posix()}", database_path

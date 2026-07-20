@@ -20,6 +20,21 @@ def test_positive_probability_uses_the_column_labeled_one() -> None:
     np.testing.assert_array_equal(positive_class_probabilities(estimator, ["a", "b"]), [0.8, 0.3])
 
 
+def test_positive_probability_forwards_lightgbm_best_iteration() -> None:
+    class IterationEstimator(_Estimator):
+        def __init__(self):
+            super().__init__([0, 1], [[0.2, 0.8]])
+            self.iteration = None
+
+        def predict_proba(self, features, *, num_iteration=None):
+            self.iteration = num_iteration
+            return self._probabilities
+
+    estimator = IterationEstimator()
+    positive_class_probabilities(estimator, ["a"], best_iteration=17)
+    assert estimator.iteration == 17
+
+
 @pytest.mark.parametrize("classes", [[0], [0, 2], [0, 0], [[0, 1]]])
 def test_positive_probability_rejects_invalid_class_contracts(classes) -> None:
     with pytest.raises(ValueError, match="class|classes"):

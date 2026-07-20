@@ -38,8 +38,6 @@ class MetadataLogisticModel:
                 f"{sorted(config.fit_parameters)}"
             )
         _reject_weighting_parameter_conflicts(config)
-        if config.class_weighting != "balanced":
-            raise ValueError("Logistic Regression requires class_weighting='balanced'")
         validated_targets = validated_binary_targets(train_targets)
         pipeline = Pipeline(
             [
@@ -77,8 +75,6 @@ class MetadataLightgbmModel:
         validation_targets: np.ndarray,
     ) -> ModelFitResult:
         """Fit train-only preprocessing and validation-monitored LightGBM."""
-        if config.class_weighting != "train_class_ratio":
-            raise ValueError("LightGBM requires class_weighting='train_class_ratio'")
         _reject_weighting_parameter_conflicts(config)
         validated_train_targets = validated_binary_targets(train_targets)
         validated_validation_targets = validated_binary_targets(validation_targets)
@@ -127,8 +123,12 @@ class MetadataLightgbmModel:
             ],
         )
         pipeline = Pipeline([("preprocess", preprocessor), ("classifier", classifier)])
-        direct_probabilities = classifier.predict_proba(transformed_validation)
-        assembled_probabilities = pipeline.predict_proba(validation_features)
+        direct_probabilities = classifier.predict_proba(
+            transformed_validation, num_iteration=classifier.best_iteration_
+        )
+        assembled_probabilities = pipeline.predict_proba(
+            validation_features, num_iteration=classifier.best_iteration_
+        )
         if not np.array_equal(direct_probabilities, assembled_probabilities):
             raise RuntimeError("Assembled LightGBM pipeline changed fitted probabilities")
         return ModelFitResult(
@@ -152,7 +152,7 @@ def _reject_weighting_parameter_conflicts(config: ModelConfig) -> None:
     conflicts = sorted(_WEIGHTING_PARAMETERS & config.parameters.keys())
     if conflicts:
         raise ValueError(
-            f"Estimator weighting parameters are controlled by class_weighting: {conflicts}"
+            f"Estimator weighting parameters are fixed by the model adapter: {conflicts}"
         )
 
 

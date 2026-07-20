@@ -75,37 +75,61 @@ def evaluate_binary(
     truth, scores = validated_binary_arrays(targets, probabilities)
     if not math_is_probability(threshold):
         raise ValueError("threshold must be finite and between 0 and 1")
+    return BinaryMetrics(
+        probability=evaluate_probabilities(truth, scores, calibration_bins=calibration_bins),
+        operating_point=evaluate_operating_point(truth, scores, threshold=threshold),
+    )
+
+
+def evaluate_probabilities(
+    targets: ArrayLike,
+    probabilities: ArrayLike,
+    *,
+    calibration_bins: int = 15,
+) -> ProbabilityMetrics:
+    """Compute threshold-independent probability metrics once."""
+    truth, scores = validated_binary_arrays(targets, probabilities)
+    slope, intercept = calibration_coefficients(truth, scores)
+    return ProbabilityMetrics(
+        average_precision=float(average_precision_score(truth, scores)),
+        roc_auc=float(roc_auc_score(truth, scores)),
+        brier_score=float(brier_score_loss(truth, scores)),
+        expected_calibration_error=expected_calibration_error(truth, scores, bins=calibration_bins),
+        calibration_slope=slope,
+        calibration_intercept=intercept,
+    )
+
+
+def evaluate_operating_point(
+    targets: ArrayLike,
+    probabilities: ArrayLike,
+    *,
+    threshold: float,
+) -> OperatingPointMetrics:
+    """Compute confusion-derived metrics at one fixed threshold."""
+    truth, scores = validated_binary_arrays(targets, probabilities)
+    if not math_is_probability(threshold):
+        raise ValueError("threshold must be finite and between 0 and 1")
     predictions = (scores >= threshold).astype(np.int8)
     tn, fp, fn, tp = confusion_matrix(truth, predictions, labels=[0, 1]).ravel()
-    slope, intercept = calibration_coefficients(truth, scores)
-    return BinaryMetrics(
-        probability=ProbabilityMetrics(
-            average_precision=float(average_precision_score(truth, scores)),
-            roc_auc=float(roc_auc_score(truth, scores)),
-            brier_score=float(brier_score_loss(truth, scores)),
-            expected_calibration_error=expected_calibration_error(
-                truth, scores, bins=calibration_bins
-            ),
-            calibration_slope=slope,
-            calibration_intercept=intercept,
-        ),
-        operating_point=OperatingPointMetrics(
-            precision=float(precision_score(truth, predictions, zero_division=0)),
-            recall=float(recall_score(truth, predictions, zero_division=0)),
-            specificity=float(tn / (tn + fp)) if tn + fp else 0.0,
-            f1=float(f1_score(truth, predictions, zero_division=0)),
-            true_negative=int(tn),
-            false_positive=int(fp),
-            false_negative=int(fn),
-            true_positive=int(tp),
-        ),
+    return OperatingPointMetrics(
+        precision=float(precision_score(truth, predictions, zero_division=0)),
+        recall=float(recall_score(truth, predictions, zero_division=0)),
+        specificity=float(tn / (tn + fp)) if tn + fp else 0.0,
+        f1=float(f1_score(truth, predictions, zero_division=0)),
+        true_negative=int(tn),
+        false_positive=int(fp),
+        false_negative=int(fn),
+        true_positive=int(tp),
     )
 
 
 def youden_j_threshold(targets: ArrayLike, probabilities: ArrayLike) -> float:
     """Select the threshold maximizing validation Youden's J statistic."""
     truth, scores = validated_binary_arrays(targets, probabilities)
-    false_positive_rate, true_positive_rate, thresholds = roc_curve(truth, scores)
+    false_positive_rate, true_positive_rate, thresholds = roc_curve(
+        truth, scores, drop_intermediate=False
+    )
     finite = np.isfinite(thresholds)
     if not finite.any():
         raise ValueError("No finite ROC thresholds are available")
@@ -122,7 +146,7 @@ def target_sensitivity_threshold(
     if not 0 < sensitivity <= 1:
         raise ValueError("sensitivity must be in (0, 1]")
     truth, scores = validated_binary_arrays(targets, probabilities)
-    _, true_positive_rate, thresholds = roc_curve(truth, scores)
+    _, true_positive_rate, thresholds = roc_curve(truth, scores, drop_intermediate=False)
     feasible = thresholds[(true_positive_rate >= sensitivity) & np.isfinite(thresholds)]
     if not len(feasible):
         raise ValueError(f"No threshold reaches sensitivity {sensitivity:.3f}")

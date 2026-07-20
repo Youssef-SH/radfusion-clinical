@@ -1,70 +1,39 @@
-"""Provide explicit registries for datasets and experiment models."""
+"""Provide immutable built-in dataset and model mappings."""
 
 from __future__ import annotations
 
+from types import MappingProxyType
+
+from radfusion.models.tabular_baseline import MetadataLightgbmModel, MetadataLogisticModel
+from radfusion.training.datasets import RsnaDataset
 from radfusion.training.interfaces import DatasetImplementation, ModelImplementation
 
 
 class RegistryError(LookupError):
-    """Raised for duplicate or missing registry entries."""
+    """Raised when a built-in component key is unknown."""
 
 
-class Registry[T]:
-    """Map stable configuration keys to registered implementations."""
-
-    def __init__(self, kind: str) -> None:
-        self._kind = kind
-        self._entries: dict[str, T] = {}
-
-    def register(self, key: str, value: T) -> None:
-        """Register one implementation under a stable key."""
-        if not key:
-            raise RegistryError(f"{self._kind} registry key must not be empty")
-        if key in self._entries:
-            raise RegistryError(f"{self._kind.title()} registry key is already registered: {key!r}")
-        self._entries[key] = value
-
-    def get(self, key: str) -> T:
-        """Return a registered implementation."""
-        try:
-            return self._entries[key]
-        except KeyError as exc:
-            raise RegistryError(f"Unknown {self._kind} registry key: {key!r}") from exc
-
-    def keys(self) -> tuple[str, ...]:
-        """Return registered keys in deterministic order."""
-        return tuple(sorted(self._entries))
+DATASETS: MappingProxyType[str, DatasetImplementation] = MappingProxyType({"rsna": RsnaDataset()})
+MODELS: MappingProxyType[str, ModelImplementation] = MappingProxyType(
+    {
+        "metadata_logistic": MetadataLogisticModel(),
+        "metadata_lightgbm": MetadataLightgbmModel(),
+    }
+)
 
 
-class DatasetRegistry(Registry[DatasetImplementation]):
-    """Registry of dataset loading and frame-construction adapters."""
-
-    def __init__(self) -> None:
-        super().__init__("dataset")
+def get_dataset(key: str) -> DatasetImplementation:
+    """Return one built-in dataset adapter."""
+    return _get(DATASETS, key, "dataset")
 
 
-class ModelRegistry(Registry[ModelImplementation]):
-    """Registry of model-specific fitting implementations."""
-
-    def __init__(self) -> None:
-        super().__init__("model")
+def get_model(key: str) -> ModelImplementation:
+    """Return one built-in model adapter."""
+    return _get(MODELS, key, "model")
 
 
-DATASET_REGISTRY = DatasetRegistry()
-MODEL_REGISTRY = ModelRegistry()
-_BUILTINS_REGISTERED = False
-
-
-def register_builtin_components() -> None:
-    """Register built-in dataset and model adapters exactly once."""
-    global _BUILTINS_REGISTERED
-    if _BUILTINS_REGISTERED:
-        return
-
-    from radfusion.models.tabular_baseline import MetadataLightgbmModel, MetadataLogisticModel
-    from radfusion.training.datasets import RsnaDataset
-
-    DATASET_REGISTRY.register("rsna", RsnaDataset())
-    MODEL_REGISTRY.register("metadata_logistic", MetadataLogisticModel())
-    MODEL_REGISTRY.register("metadata_lightgbm", MetadataLightgbmModel())
-    _BUILTINS_REGISTERED = True
+def _get[T](mapping: MappingProxyType[str, T], key: str, kind: str) -> T:
+    try:
+        return mapping[key]
+    except KeyError as exc:
+        raise RegistryError(f"Unknown {kind} key: {key!r}") from exc

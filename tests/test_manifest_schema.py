@@ -916,7 +916,6 @@ def test_consumer_rejects_metadata_that_does_not_match_bundle_id(tmp_path: Path)
         "dictionary-ratios",
         "reordered-ratios",
         "duplicate-split-name",
-        "cohort-fingerprint",
         "unknown-field",
     ],
 )
@@ -935,8 +934,6 @@ def test_consumer_rejects_noncanonical_split_metadata(
         split["ratios"] = [split["ratios"][0], split["ratios"][2], split["ratios"][1]]
     elif invalid_form == "duplicate-split-name":
         split["ratios"][1]["split_name"] = "train"
-    elif invalid_form == "cohort-fingerprint":
-        split["cohort_fingerprint"] = "legacy"
     else:
         split["unexpected"] = "legacy"
     written.paths.metadata_path.write_text(

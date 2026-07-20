@@ -16,7 +16,12 @@ class ProbabilityEstimator(Protocol):
         """Return class probabilities."""
 
 
-def positive_class_probabilities(estimator: ProbabilityEstimator, features: Any) -> np.ndarray:
+def positive_class_probabilities(
+    estimator: ProbabilityEstimator,
+    features: Any,
+    *,
+    best_iteration: int | None = None,
+) -> np.ndarray:
     """Return validated probabilities for the exact positive label ``1``."""
     classes = np.asarray(getattr(estimator, "classes_", None))
     if classes.ndim != 1 or len(classes) != 2 or len(np.unique(classes)) != 2:
@@ -26,7 +31,17 @@ def positive_class_probabilities(estimator: ProbabilityEstimator, features: Any)
     positive_columns = np.flatnonzero(classes == 1)
     if len(positive_columns) != 1:
         raise ValueError("Estimator must expose the positive class label 1 exactly once")
-    probabilities = np.asarray(estimator.predict_proba(features), dtype=np.float64)
+    if best_iteration is None:
+        raw_probabilities = estimator.predict_proba(features)
+    elif hasattr(estimator, "named_steps"):
+        transformed = estimator.named_steps["preprocess"].transform(features)
+        raw_probabilities = estimator.named_steps["classifier"].predict_proba(
+            transformed,
+            num_iteration=best_iteration,
+        )
+    else:
+        raw_probabilities = estimator.predict_proba(features, num_iteration=best_iteration)
+    probabilities = np.asarray(raw_probabilities, dtype=np.float64)
     if (
         probabilities.ndim != 2
         or probabilities.shape[0] == 0
