@@ -78,8 +78,13 @@ training; the explicit evaluator owns test evaluation.
 
 ## Tracking and outputs
 
-MLflow stores run metadata in `mlflow.db` and run artifacts under `mlartifacts/`. Inspect local
-runs with:
+Model packages under `models/` and complete reports under `reports/` are the authoritative
+physical outputs. MLflow stores the run ledger, parameters, scalar metrics, provenance, lineage,
+completion state, references to project-owned outputs, and the resolved configuration. Complete
+model packages and report directories are not mirrored into `mlartifacts/`.
+
+MLflow stores run metadata in `mlflow.db` and its resolved-configuration artifacts under
+`mlartifacts/`. Inspect local runs with:
 
 ```bash
 uv run mlflow server --backend-store-uri sqlite:///mlflow.db
@@ -87,8 +92,8 @@ uv run mlflow server --backend-store-uri sqlite:///mlflow.db
 
 A training run logs the exact loaded YAML before dataset access and records resolved split and
 label-policy lineage before fitting. Training and test-evaluation runs become complete only after
-required MLflow artifacts and local run-qualified outputs are published. The test run links to its
-source training run and does not publish another model.
+their local run-qualified outputs are published. The test run links to its source training run and
+does not publish another model.
 
 Local training packages contain:
 

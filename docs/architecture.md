@@ -33,8 +33,9 @@ The manifest owns dataset, task, split, source, and artifact lineage. Parquet ta
 row-level facts, while audits contain derived descriptions. `CURRENT` selects a bundle for
 interactive commands; experiment configs pin an exact bundle ID.
 
-MLflow stores experiment metadata in local SQLite. Reports, models, plots, resolved
-configurations, and MLflow artifacts remain filesystem files.
+Model packages under `models/` and complete reports under `reports/` are the authoritative
+physical outputs. MLflow stores the run ledger and references to those outputs; see
+[`training.md`](training.md) for the experiment artifact contract.
 
 ## Data flow
 

@@ -131,9 +131,10 @@ Immutable model lineage and comparison-table roles are defined in [`training.md`
 
 MLflow stores the experiment history. Every training attempt logs the exact loaded YAML before
 dataset access and records resolved split and label-policy lineage before fitting. Successful
-training runs also record resolved parameters, validation metrics, thresholds, reports, and the
-exact serialized model bytes. Linked test runs record test metrics and reports without publishing
-another fitted model.
+training runs record resolved parameters, validation metrics, thresholds, and references to the
+project-owned outputs. Linked test runs record test metrics and report references without
+publishing another fitted model. The artifact ownership contract is defined in
+[`training.md`](training.md).
 
 Run metadata is stored in `mlflow.db`. MLflow artifacts are ordinary files under `mlartifacts/`;
 model packages and reports remain under `models/` and `reports/`. These locations are generated

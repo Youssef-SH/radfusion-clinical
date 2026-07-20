@@ -49,8 +49,8 @@ make inspect FILE=path/to/image.dcm
 ```
 
 Replace `<training-run-id>` with the run ID printed by `make train`; do not type the angle
-brackets. MLflow metadata is stored in `mlflow.db`, and run artifacts are stored under
-`mlartifacts/`.
+brackets. Model packages are stored under `models/`, generated reports under `reports/`, MLflow
+metadata in `mlflow.db`, and small MLflow provenance artifacts under `mlartifacts/`.
 
 Every executable experiment is declared by a validated YAML file under `configs/`. See
 [`docs/training.md`](docs/training.md) for the training workflow.

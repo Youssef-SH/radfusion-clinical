@@ -225,8 +225,6 @@ def train_configured_experiment(
                     model_size_mib=serialized.stat().st_size / (1024.0 * 1024.0),
                 )
             )
-            mlflow.log_artifacts(str(report_stage), artifact_path="report")
-            mlflow.log_artifact(str(serialized), artifact_path="model")
             published = publish_model_run(
                 model_root=config.training.model_directory,
                 mlflow_run_id=run_id,

@@ -183,7 +183,6 @@ def evaluate_training_run(
                     model_size_mib=model_path.stat().st_size / (1024.0 * 1024.0),
                 )
             )
-            mlflow.log_artifacts(str(report_stage), artifact_path="report")
             publish_directory(report_stage, report_directory)
             mlflow.set_tags(
                 {

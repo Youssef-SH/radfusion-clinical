@@ -21,7 +21,7 @@ from radfusion.training.config import load_experiment_config
 from radfusion.training.datasets import RsnaDataset
 from radfusion.training.evaluate import _verify_training_lineage, evaluate_training_run
 from radfusion.training.interfaces import DatasetLineage, DatasetPartition, DatasetRunData
-from radfusion.training.train_tabular import train_configured_experiment
+from radfusion.training.train_tabular import train_configured_experiment, validate_report_set
 from radfusion.utils.mlflow_utils import configure_mlflow
 from radfusion.utils.model_publication import validate_published_model
 
@@ -154,6 +154,10 @@ def test_train_then_explicit_test_evaluation_uses_separate_partitions_and_runs(
     assert test_loads == 1
     training_run = mlflow.get_run(training.run_id)
     evaluation_run = mlflow.get_run(evaluation.run_id)
+    assert training_run.info.status == "FINISHED"
+    assert evaluation_run.info.status == "FINISHED"
+    assert training_run.data.tags["run_complete"] == "true"
+    assert evaluation_run.data.tags["run_complete"] == "true"
     assert training_run.data.tags["evaluation_scope"] == "validation"
     assert evaluation_run.data.tags["evaluation_scope"] == "test"
     assert evaluation_run.data.tags["source_training_run_id"] == training.run_id
@@ -165,17 +169,30 @@ def test_train_then_explicit_test_evaluation_uses_separate_partitions_and_runs(
     )
 
     manifest = validate_published_model(training.model_path.parent)
+    assert {path.name for path in training.model_path.parent.iterdir()} == {
+        "model.skops",
+        "resolved_config.yaml",
+        "model_manifest.json",
+    }
     assert set(manifest["thresholds"]) == {"youden_j", "target_sensitivity"}
+    validate_report_set(training.artifact_directory)
+    validate_report_set(evaluation.artifact_directory)
     metrics = json.loads(
         (evaluation.artifact_directory / "metrics.json").read_text(encoding="utf-8")
     )
     assert metrics["evaluation_scope"] == "test"
 
     client = _client(tmp_path)
-    downloaded = Path(
-        client.download_artifacts(training.run_id, "model/model.skops", tmp_path / "download")
+    assert {item.path for item in client.list_artifacts(training.run_id)} == {"config"}
+    assert client.list_artifacts(evaluation.run_id) == []
+    resolved_config = Path(
+        client.download_artifacts(
+            training.run_id,
+            "config/resolved_config.yaml",
+            tmp_path / "download",
+        )
     )
-    assert downloaded.read_bytes() == training.model_path.read_bytes()
+    assert resolved_config.read_bytes() == config.source_bytes
 
 
 def test_fit_failure_leaves_failed_mlflow_run(
