@@ -9,7 +9,7 @@
   contents, hashes, policies, and provenance. The `rsna-manifest` command runs a build.
 
 The lifecycle is: source dataset → build execution → immutable bundle → validated consumers.
-`CURRENT` points to the active bundle without changing any published bundle.
+`CURRENT` selects the active bundle; published bundles remain immutable.
 
 ## Component boundaries
 
@@ -26,8 +26,8 @@ The lifecycle is: source dataset → build execution → immutable bundle → va
 | Test evaluator | Apply a completed training run to the test partition |
 | Evaluation utilities | Compute probabilities, metrics, thresholds, latency, and plots |
 
-Dataset adapters isolate source-specific behavior. Training consumes validated bundles and never
-parses raw dataset files. Model adapters own estimator construction and fitting.
+Dataset adapters isolate source-specific behavior. Training reads validated bundles through the
+dataset mapping. Model adapters own estimator construction and fitting.
 
 The manifest owns dataset, task, split, source, and artifact lineage. Parquet tables contain
 row-level facts, while audits contain derived descriptions. `CURRENT` selects a bundle for

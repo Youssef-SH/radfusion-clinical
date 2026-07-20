@@ -1,6 +1,9 @@
 # RadFusion-Clinical
 
-RadFusion-Clinical is a reproducible machine-learning benchmark and experimentation framework for radiographic pneumonia prediction, currently centered on the RSNA Pneumonia Detection Challenge. The current implementation provides deterministic data preparation, patient-disjoint evaluation, and reproducible metadata-based baselines.
+RadFusion-Clinical is a reproducible machine-learning benchmark and experimentation framework for
+radiographic pneumonia prediction, centered on the RSNA Pneumonia Detection Challenge. It provides
+deterministic data preparation, patient-disjoint evaluation, and reproducible metadata-based
+baselines.
 
 > This is a research and educational prototype. It is not a medical device and must not be used for clinical decision-making.
 
@@ -48,9 +51,9 @@ make pre-commit      # run repository hooks against all tracked files
 make inspect FILE=path/to/image.dcm
 ```
 
-Replace `<training-run-id>` with the run ID printed by `make train`; do not type the angle
-brackets. Model packages are stored under `models/`, generated reports under `reports/`, MLflow
-metadata in `mlflow.db`, and small MLflow provenance artifacts under `mlartifacts/`.
+`<training-run-id>` denotes the run ID printed by `make train`. Model packages are stored under
+`models/`, generated reports under `reports/`, MLflow metadata in `mlflow.db`, and small MLflow
+training-configuration artifacts under `mlartifacts/`.
 
 Every executable experiment is declared by a validated YAML file under `configs/`. See
 [`docs/training.md`](docs/training.md) for the training workflow.
@@ -82,8 +85,7 @@ version control. See [`docs/privacy.md`](docs/privacy.md).
 
 ## Limitations
 
-- The current implementation covers the labeled RSNA Stage 2 training set and metadata-only
-  baselines.
+- Implemented scope covers the labeled RSNA Stage 2 training set and metadata-only baselines.
 - The labels are derived from public radiology-labeling pipelines and are not equivalent to
   confirmed clinical diagnosis.
 

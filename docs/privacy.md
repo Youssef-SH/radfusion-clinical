@@ -21,10 +21,10 @@ filtering.
 
 ## Reports
 
-Public reports contain aggregate counts, distributions, quality findings, and model metrics.
-Publication checks reject source patient IDs, sample IDs, image names and paths, UUID-shaped
-identifiers, and DICOM UID-shaped values. Model evaluation reports are also logged to MLflow after
-privacy validation.
+Dataset audits and model evaluation reports contain aggregate counts, distributions, quality
+findings, and metrics. Before publication, checks reject source patient IDs, sample IDs, image
+names and paths, UUID-shaped identifiers, and DICOM UID-shaped values. These reports are published
+under `reports/`. Comparison views are generated from aggregate MLflow metrics and lineage.
 
 Public examples and test fixtures use synthetic data. External transfer of raw or derived data
 requires the dataset terms and project data-handling policy to permit the destination and use.

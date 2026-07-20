@@ -32,8 +32,8 @@ mlflow:
   experiment_name: radfusion-rsna
 ```
 
-The loader rejects missing, unknown, and duplicate keys. The bundle ID is mandatory; experiments
-never resolve `CURRENT`. `training.seed` is the single randomness authority.
+The loader rejects missing, unknown, and duplicate keys. Each experiment names an exact immutable
+bundle ID. `training.seed` is the single randomness authority.
 
 The executable configs are `configs/metadata_logistic.yaml` and
 `configs/metadata_lightgbm.yaml`.
@@ -61,8 +61,7 @@ make evaluate RUN_ID=<training-run-id>
 make compare
 ```
 
-Replace `<training-run-id>` with the actual ID printed by `make train`. The angle brackets mark a
-placeholder and are not part of the command.
+`<training-run-id>` denotes the run ID printed by `make train`.
 
 Training validates the complete pinned bundle, then performs projected and filtered reads for
 train and validation only. It fits preprocessing and the estimator on train, uses validation for
@@ -80,10 +79,8 @@ training; the explicit evaluator owns test evaluation.
 
 Model packages under `models/` and complete reports under `reports/` are the authoritative
 physical outputs. MLflow stores the run ledger, parameters, scalar metrics, provenance, lineage,
-completion state, references to project-owned outputs, and the resolved configuration. Complete
-model packages and report directories are not mirrored into `mlartifacts/`.
-
-MLflow stores run metadata in `mlflow.db` and its resolved-configuration artifacts under
+completion state, references to project-owned outputs, and the exact loaded training
+configuration. Run metadata lives in `mlflow.db`; training configuration artifacts live under
 `mlartifacts/`. Inspect local runs with:
 
 ```bash
@@ -92,8 +89,8 @@ uv run mlflow server --backend-store-uri sqlite:///mlflow.db
 
 A training run logs the exact loaded YAML before dataset access and records resolved split and
 label-policy lineage before fitting. Training and test-evaluation runs become complete only after
-their local run-qualified outputs are published. The test run links to its source training run and
-does not publish another model.
+their local run-qualified outputs are published. Training runs publish model packages; test runs
+link to their source training runs and publish test reports.
 
 Local training packages contain:
 
@@ -106,7 +103,6 @@ models/rsna/runs/<training-run-id>/
 
 The manifest records the model hash, training run, pinned bundle and split assignment, task,
 positive class, config hash, seed, Git commit, dependency lock, best iteration, and thresholds.
-There is no model selection pointer.
 
 Each training or test-evaluation run publishes aggregate reports under
 `reports/rsna/runs/<run-id>/`:
@@ -126,8 +122,8 @@ Publication requires exactly this set after privacy validation. `make compare` d
 regenerates `reports/model_comparison_table.csv` and `.md` from complete, finite MLflow records.
 Failed, unfinished, and incomplete runs are excluded.
 
-The tracking URI is operational infrastructure. All commands default to `sqlite:///mlflow.db` and
-accept `--tracking-uri` when an isolated local SQLite database is required.
+The training, evaluation, and comparison CLIs default to `sqlite:///mlflow.db` and accept
+`--tracking-uri` when an isolated local SQLite database is required.
 
 Metric definitions and experimental protocols are documented in
 [`reproducibility.md`](reproducibility.md).

@@ -8,7 +8,7 @@ The project targets Python 3.13. `uv.lock` defines the dependency environment.
 uv sync --locked
 ```
 
-Each experiment records the lock-file SHA-256, Python version, operating system, CPU architecture
+Each training run records the lock-file SHA-256, Python version, operating system, CPU architecture
 and model, and versions of NumPy, PyArrow, scikit-learn, LightGBM, MLflow, and skops.
 
 ## Rebuild the RSNA bundle
@@ -66,7 +66,7 @@ make evaluate RUN_ID=<training-run-id>
 make compare
 ```
 
-Replace `<training-run-id>` with the actual run ID printed by training.
+`<training-run-id>` denotes the run ID printed by training.
 
 Audits are published under `reports/rsna/audit/<bundle-id>/`. Rebuilding one audit replaces only
 that bundle-qualified audit directory.
@@ -77,10 +77,9 @@ training data. Validation selects the LightGBM stopping point and both operating
 test in a separate linked run.
 
 Training runs record the Git commit and dirty status, exact configuration bytes and hash,
-dependency-lock hash, environment, dataset identity, and model lineage. A dirty run records that
-uncommitted changes existed but does not archive their bytes, so its Git lineage alone cannot
-reconstruct that source state. Test-evaluation runs record the model and dataset lineage they use
-and link to the verified source training run.
+dependency-lock hash, environment, dataset identity, and model lineage. Exact reconstruction of a
+dirty run requires preserving its uncommitted source state separately. Test-evaluation runs record
+the model and dataset lineage they use and link to the verified source training run.
 
 ## Probability and operating-point metrics
 
@@ -118,8 +117,8 @@ bootstrap resampling is not used.
 
 Latency covers the complete preprocessing and probability pipeline on CPU. It is the median of
 1,000 individually timed single-sample calls after 100 warm-up calls. The benchmark always uses
-the first sample in deterministic test order. Results are reported in milliseconds and remain
-dependent on hardware and system load.
+the first sample in deterministic order for the evaluated partition. Results are reported in
+milliseconds and remain dependent on hardware and system load.
 
 Model size is the exact serialized `model.skops` byte count divided by 1,048,576 and reported as
 MiB.
@@ -132,13 +131,12 @@ Immutable model lineage and comparison-table roles are defined in [`training.md`
 MLflow stores the experiment history. Every training attempt logs the exact loaded YAML before
 dataset access and records resolved split and label-policy lineage before fitting. Successful
 training runs record resolved parameters, validation metrics, thresholds, and references to the
-project-owned outputs. Linked test runs record test metrics and report references without
-publishing another fitted model. The artifact ownership contract is defined in
-[`training.md`](training.md).
+project-owned outputs. Training runs own model packages; linked test runs record test metrics and
+report references. The artifact ownership contract is defined in [`training.md`](training.md).
 
-Run metadata is stored in `mlflow.db`. MLflow artifacts are ordinary files under `mlartifacts/`;
-model packages and reports remain under `models/` and `reports/`. These locations are generated
-state and are removed by `make clean`.
+Run metadata is stored in `mlflow.db`, and training configuration artifacts are stored under
+`mlartifacts/`. Model packages live under `models/`, and reports live under `reports/`. These
+locations are generated state and are removed by `make clean`.
 
 ## Quality gates
 

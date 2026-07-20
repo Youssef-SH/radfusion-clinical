@@ -32,6 +32,10 @@ data/
           rsna_manifest_metadata.json
 ```
 
+Bundle construction requires `stage_2_train_labels.csv`,
+`stage_2_detailed_class_info.csv`, and `stage_2_train_images/`. The submission CSV and unlabeled
+test images are shown for completeness and remain source-only.
+
 After accepting the competition terms and configuring the Kaggle CLI outside the repository, the
 archive can be downloaded with the command documented in `docs/datasets/rsna.md`. Extract it into
 the layout above and run:
