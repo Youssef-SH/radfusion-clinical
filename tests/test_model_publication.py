@@ -1,225 +1,156 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 from sklearn.linear_model import LogisticRegression
 
-import radfusion.utils.model_publication as model_publication
-from radfusion.utils.model_publication import publish_model_run, validate_published_model
+from radfusion.utils.model_publication import (
+    REQUIRED_MANIFEST_FIELDS,
+    publish_model_run,
+    validate_published_model,
+)
 from radfusion.utils.skops_io import load_skops, save_skops
 
 _SHA256 = "a" * 64
 
 
-def _lineage() -> dict[str, object]:
+def _manifest() -> dict[str, object]:
     return {
-        "dataset_id": "rsna",
-        "task_id": "pneumonia",
-        "config_source_sha256": _SHA256,
         "bundle_id": "build-test",
-        "cohort_fingerprint": "cohort-test",
-        "split_recipe_id": "recipe-test",
         "split_assignment_id": "assignment-test",
-        "label_policy_version": "label-test",
-        "training_seed": 42,
+        "task": "pneumonia",
+        "positive_class": 1,
+        "source_config_sha256": _SHA256,
+        "seed": 42,
         "git_commit": "commit-test",
-        "git_dirty": False,
-        "git_source_state_sha256": "clean",
-        "uv_lock_sha256": _SHA256,
-        "derived_parameters": {"best_iteration": None},
+        "dependency_lock_sha256": _SHA256,
+        "best_iteration": None,
+        "thresholds": {"youden_j": 0.5, "target_sensitivity": 0.3},
     }
 
 
-def test_model_run_publication_is_immutable_traceable_and_loadable(tmp_path) -> None:
+def _publish(tmp_path: Path):
     features = pd.DataFrame({"x": [0.0, 1.0, 2.0, 3.0]})
-    targets = np.asarray([0, 0, 1, 1])
-    model = LogisticRegression().fit(features, targets)
+    model = LogisticRegression().fit(features, [0, 0, 1, 1])
+    serialized = save_skops(model, tmp_path / "source.skops")
+    config = tmp_path / "source.yaml"
+    config.write_text("config_version: 1\n", encoding="utf-8")
+    manifest = {
+        **_manifest(),
+        "source_config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+    }
     published = publish_model_run(
-        model,
         model_root=tmp_path / "models" / "rsna",
-        model_key="metadata_logistic",
         mlflow_run_id="run-test",
-        lineage=_lineage(),
+        serialized_model_path=serialized,
+        source_config_bytes=config.read_bytes(),
+        manifest=manifest,
+    )
+    return features, model, published
+
+
+def test_model_package_is_compact_run_qualified_and_loadable(tmp_path: Path) -> None:
+    features, model, published = _publish(tmp_path)
+
+    assert published.run_directory == tmp_path / "models" / "rsna" / "runs" / "run-test"
+    assert {path.name for path in published.run_directory.iterdir()} == {
+        "model.skops",
+        "resolved_config.yaml",
+        "model_manifest.json",
+    }
+    document = validate_published_model(published.run_directory)
+    assert set(document) == REQUIRED_MANIFEST_FIELDS
+    np.testing.assert_array_equal(
+        load_skops(published.model_path).predict_proba(features),
+        model.predict_proba(features),
     )
 
-    assert published.run_directory.name == "run-test"
-    assert (tmp_path / "models" / "rsna" / "metadata_logistic" / "CURRENT").read_text(
-        encoding="utf-8"
-    ) == "run-test\n"
-    lineage = validate_published_model(published.run_directory)
-    assert lineage["model_artifact_sha256"] == published.model_artifact_sha256
-    restored = load_skops(published.model_path)
-    np.testing.assert_array_equal(restored.predict_proba(features), model.predict_proba(features))
 
-    retried = publish_model_run(
-        None,
-        model_root=tmp_path / "models" / "rsna",
-        model_key="metadata_logistic",
-        mlflow_run_id="run-test",
-        serialized_model_path=published.model_path,
-        lineage=_lineage(),
-    )
-    assert retried == published
+def test_model_package_preserves_exact_serialized_and_config_bytes(tmp_path: Path) -> None:
+    _, _, published = _publish(tmp_path)
+    assert published.model_path.read_bytes() == (tmp_path / "source.skops").read_bytes()
+    assert published.config_path.read_bytes() == (tmp_path / "source.yaml").read_bytes()
 
 
-def test_model_lineage_tampering_is_rejected(tmp_path) -> None:
-    model = LogisticRegression().fit([[0.0], [1.0]], [0, 1])
-    published = publish_model_run(
-        model,
-        model_root=tmp_path,
-        model_key="model",
-        mlflow_run_id="run",
-        lineage=_lineage(),
-    )
-    document = json.loads(published.lineage_path.read_text(encoding="utf-8"))
-    document["model_artifact_sha256"] = "tampered"
-    published.lineage_path.write_text(json.dumps(document), encoding="utf-8")
+def test_model_manifest_tampering_is_rejected(tmp_path: Path) -> None:
+    _, _, published = _publish(tmp_path)
+    document = json.loads(published.manifest_path.read_text(encoding="utf-8"))
+    document["model_sha256"] = "tampered"
+    published.manifest_path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(ValueError, match="SHA-256"):
         validate_published_model(published.run_directory)
 
 
-@pytest.mark.parametrize(("model_key", "run_id"), [("../model", "run"), ("model", "../run")])
-def test_model_publication_rejects_unsafe_path_components(
-    tmp_path, model_key: str, run_id: str
-) -> None:
+@pytest.mark.parametrize("run_id", ["../run", "a/b", ".", ".."])
+def test_model_publication_rejects_unsafe_run_ids(tmp_path: Path, run_id: str) -> None:
     model = LogisticRegression().fit([[0.0], [1.0]], [0, 1])
+    serialized = save_skops(model, tmp_path / "source.skops")
+    config = tmp_path / "source.yaml"
+    config.write_text("test\n", encoding="utf-8")
     with pytest.raises(ValueError, match="safe path component"):
         publish_model_run(
-            model,
-            model_root=tmp_path,
-            model_key=model_key,
-            mlflow_run_id=run_id,
-            lineage=_lineage(),
-        )
-
-
-@pytest.mark.parametrize("entry_kind", ["file", "directory", "symlink"])
-def test_model_validation_rejects_unexpected_entries(tmp_path, entry_kind: str) -> None:
-    model = LogisticRegression().fit([[0.0], [1.0]], [0, 1])
-    published = publish_model_run(
-        model,
-        model_root=tmp_path,
-        model_key="model",
-        mlflow_run_id="run",
-        lineage=_lineage(),
-    )
-    unexpected = published.run_directory / "unexpected"
-    if entry_kind == "file":
-        unexpected.write_text("unexpected\n", encoding="utf-8")
-    elif entry_kind == "directory":
-        unexpected.mkdir()
-    else:
-        unexpected.symlink_to(published.model_path.name)
-
-    with pytest.raises(ValueError, match="unexpected artifact set"):
-        validate_published_model(published.run_directory)
-
-
-@pytest.mark.parametrize("filename", ["model.skops", "lineage.json"])
-def test_model_validation_rejects_required_symlinks(tmp_path, filename: str) -> None:
-    model = LogisticRegression().fit([[0.0], [1.0]], [0, 1])
-    published = publish_model_run(
-        model,
-        model_root=tmp_path,
-        model_key="model",
-        mlflow_run_id="run",
-        lineage=_lineage(),
-    )
-    required = published.run_directory / filename
-    external = tmp_path / f"external-{filename}"
-    required.rename(external)
-    required.symlink_to(external)
-
-    with pytest.raises(ValueError, match="regular non-symlink"):
-        validate_published_model(published.run_directory)
-
-
-def test_model_validation_uses_the_physical_parent_model_key(tmp_path) -> None:
-    model = LogisticRegression().fit([[0.0], [1.0]], [0, 1])
-    published = publish_model_run(
-        model,
-        model_root=tmp_path,
-        model_key="original-model",
-        mlflow_run_id="run",
-        lineage=_lineage(),
-    )
-    moved = tmp_path / "different-model" / "runs" / "run"
-    moved.parent.mkdir(parents=True)
-    published.run_directory.rename(moved)
-
-    with pytest.raises(ValueError, match="does not match its immutable run path"):
-        validate_published_model(moved)
-
-
-def test_model_publication_recovers_after_current_update_failure(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    model = LogisticRegression().fit([[0.0], [1.0]], [0, 1])
-    serialized = save_skops(model, tmp_path / "serialized.skops")
-    model_root = tmp_path / "models"
-    real_update = model_publication._update_current
-    attempts = 0
-
-    def fail_once(path, run_id):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise OSError("CURRENT update failed")
-        real_update(path, run_id)
-
-    monkeypatch.setattr("radfusion.utils.model_publication._update_current", fail_once)
-    with pytest.raises(OSError, match="CURRENT update failed"):
-        publish_model_run(
-            None,
-            model_root=model_root,
-            model_key="model",
-            mlflow_run_id="run",
-            serialized_model_path=serialized,
-            lineage=_lineage(),
-        )
-
-    run_directory = model_root / "model" / "runs" / "run"
-    validate_published_model(run_directory)
-    original_contents = {path.name: path.read_bytes() for path in sorted(run_directory.iterdir())}
-
-    recovered = publish_model_run(
-        None,
-        model_root=model_root,
-        model_key="model",
-        mlflow_run_id="run",
-        serialized_model_path=serialized,
-        lineage=_lineage(),
-    )
-
-    assert recovered.run_directory == run_directory
-    assert (model_root / "model" / "CURRENT").read_text(encoding="utf-8") == "run\n"
-    assert {path.name: path.read_bytes() for path in sorted(run_directory.iterdir())} == (
-        original_contents
-    )
-
-
-def test_model_publication_rejects_conflicting_retry_content(tmp_path) -> None:
-    model = LogisticRegression().fit([[0.0], [1.0]], [0, 1])
-    serialized = save_skops(model, tmp_path / "serialized.skops")
-    publish_model_run(
-        None,
-        model_root=tmp_path / "models",
-        model_key="model",
-        mlflow_run_id="run",
-        serialized_model_path=serialized,
-        lineage=_lineage(),
-    )
-    conflicting = {**_lineage(), "task_id": "different-task"}
-
-    with pytest.raises(FileExistsError, match="conflicting content"):
-        publish_model_run(
-            None,
             model_root=tmp_path / "models",
-            model_key="model",
-            mlflow_run_id="run",
+            mlflow_run_id=run_id,
             serialized_model_path=serialized,
-            lineage=conflicting,
+            source_config_bytes=config.read_bytes(),
+            manifest={
+                **_manifest(),
+                "source_config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+            },
         )
+
+
+def test_conflicting_model_publication_retry_is_rejected(tmp_path: Path) -> None:
+    _, _, published = _publish(tmp_path)
+    with pytest.raises(FileExistsError, match="conflicting"):
+        publish_model_run(
+            model_root=tmp_path / "models" / "rsna",
+            mlflow_run_id="run-test",
+            serialized_model_path=published.model_path,
+            source_config_bytes=published.config_path.read_bytes(),
+            manifest={
+                **_manifest(),
+                "bundle_id": "different",
+                "source_config_sha256": hashlib.sha256(
+                    published.config_path.read_bytes()
+                ).hexdigest(),
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "value"),
+    [
+        ("youden_j", True),
+        ("youden_j", "0.5"),
+        ("youden_j", float("nan")),
+        ("youden_j", float("inf")),
+        ("youden_j", -0.1),
+        ("youden_j", 1.1),
+        ("missing", None),
+        ("extra", 0.5),
+    ],
+)
+def test_model_manifest_rejects_invalid_thresholds(
+    tmp_path: Path,
+    mutation: str,
+    value: object,
+) -> None:
+    _, _, published = _publish(tmp_path)
+    document = json.loads(published.manifest_path.read_text(encoding="utf-8"))
+    thresholds = document["thresholds"]
+    if mutation == "missing":
+        thresholds.pop("youden_j")
+    elif mutation == "extra":
+        thresholds["unexpected"] = value
+    else:
+        thresholds[mutation] = value
+    published.manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="threshold"):
+        validate_published_model(published.run_directory)

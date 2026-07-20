@@ -13,18 +13,12 @@ import pyarrow as pa
 
 from radfusion.data.artifact_validation import pneumonia_targets
 from radfusion.data.rsna_source import ManifestBuildError
-from radfusion.data.schemas import (
-    DATASET_ID,
-    PNEUMONIA_TASK_ID,
-    RSNA_LABEL_SCHEMA,
-    RSNA_SAMPLE_SCHEMA,
-    RSNA_SPLIT_SCHEMA,
-    require_exact_schema,
-)
+from radfusion.data.schemas import PNEUMONIA_TASK_ID, RSNA_SPLIT_SCHEMA, require_exact_schema
 
 SPLIT_NAMES = ("train", "validation", "test")
 SPLIT_ALGORITHM = "patient-stratified-sha256"
 SPLIT_ALGORITHM_POLICY_VERSION = "2"
+SPLIT_ALGORITHM_VERSION = f"{SPLIT_ALGORITHM}-v{SPLIT_ALGORITHM_POLICY_VERSION}"
 SPLIT_SOURCE = "generated:patient-stratified-pneumonia"
 PATIENT_GROUPING_RULE = "group-all-samples-by-patient-id"
 PATIENT_TARGET_CONSISTENCY_RULE = "all-patient-samples-share-one-binary-target"
@@ -62,21 +56,15 @@ class SplitConfig:
 
     @property
     def recipe_payload(self) -> dict[str, Any]:
-        """Return the complete split-policy identity payload."""
+        """Return the compact split recipe identity payload."""
         return {
-            "algorithm": SPLIT_ALGORITHM,
-            "algorithm_policy_version": SPLIT_ALGORITHM_POLICY_VERSION,
+            "algorithm_version": SPLIT_ALGORITHM_VERSION,
             "seed": self.seed,
-            "ratios": dict(zip(SPLIT_NAMES, self.ratios, strict=True)),
-            "patient_grouping_rule": PATIENT_GROUPING_RULE,
-            "patient_target_consistency_rule": PATIENT_TARGET_CONSISTENCY_RULE,
             "stratification_target": STRATIFICATION_TARGET,
-            "ranking_rule": PATIENT_RANKING_RULE,
-            "hash_algorithm": PATIENT_HASH_ALGORITHM,
-            "hash_input_encoding": PATIENT_HASH_INPUT_ENCODING,
-            "hash_input_template": PATIENT_HASH_INPUT_TEMPLATE,
-            "allocation_rule": SPLIT_ALLOCATION_RULE,
-            "split_order": list(SPLIT_NAMES),
+            "ratios": [
+                {"split_name": name, "ratio": ratio}
+                for name, ratio in zip(SPLIT_NAMES, self.ratios, strict=True)
+            ],
         }
 
     @property
@@ -86,57 +74,9 @@ class SplitConfig:
         return _identity("split-recipe", self.recipe_payload)
 
 
-def cohort_fingerprint(samples: pa.Table, labels: pa.Table) -> str:
-    """Fingerprint canonical patient membership and patient-consistent targets."""
-    sample_rows = samples.to_pylist()
-    targets = pneumonia_targets(labels)
-    patient_samples: dict[str, list[str]] = defaultdict(list)
-    patient_targets: dict[str, set[int]] = defaultdict(set)
-    for row in sample_rows:
-        sample_id = row["sample_id"]
-        if sample_id not in targets:
-            raise ManifestBuildError(f"Sample {sample_id!r} has no pneumonia target")
-        patient_id = row["patient_id"]
-        patient_samples[patient_id].append(sample_id)
-        patient_targets[patient_id].add(targets[sample_id])
-    patients: list[dict[str, Any]] = []
-    for patient_id in sorted(patient_samples):
-        values = patient_targets[patient_id]
-        if len(values) != 1:
-            raise ManifestBuildError(
-                f"Patient {patient_id!r} has inconsistent pneumonia targets: {sorted(values)}"
-            )
-        patients.append(
-            {
-                "patient_id": patient_id,
-                "sample_ids": sorted(patient_samples[patient_id]),
-                "target": next(iter(values)),
-            }
-        )
-    payload = {
-        "dataset_id": DATASET_ID,
-        "sample_schema_ipc_hex": RSNA_SAMPLE_SCHEMA.serialize().to_pybytes().hex(),
-        "label_schema_ipc_hex": RSNA_LABEL_SCHEMA.serialize().to_pybytes().hex(),
-        "canonical_order": "patient_id-then-sample_id",
-        "patients": patients,
-    }
-    return _identity("cohort", payload)
-
-
-def split_assignment_id(
-    split_recipe_id: str,
-    cohort_id: str,
-    assignments: dict[str, str],
-) -> str:
-    """Fingerprint one recipe, cohort, and canonical sample assignment."""
-    payload = {
-        "split_recipe_id": split_recipe_id,
-        "cohort_fingerprint": cohort_id,
-        "assignments": [
-            {"sample_id": sample_id, "split_name": assignments[sample_id]}
-            for sample_id in sorted(assignments)
-        ],
-    }
+def split_assignment_id(assignments: dict[str, str]) -> str:
+    """Fingerprint canonical sample-to-split assignments."""
+    payload = [[sample_id, assignments[sample_id]] for sample_id in sorted(assignments)]
     return _identity("split-assignment", payload)
 
 
@@ -149,18 +89,10 @@ def create_patient_stratified_splits(
     resolved = config or SplitConfig()
     resolved.validate()
     assignments = _create_assignments(samples, labels, resolved)
-    cohort_id = cohort_fingerprint(samples, labels)
-    recipe_id = resolved.recipe_id
-    assignment_id = split_assignment_id(recipe_id, cohort_id, assignments)
     records = [
         {
-            "dataset_id": DATASET_ID,
             "sample_id": sample_id,
             "split_name": assignments[sample_id],
-            "split_recipe_id": recipe_id,
-            "cohort_fingerprint": cohort_id,
-            "split_assignment_id": assignment_id,
-            "split_source": SPLIT_SOURCE,
         }
         for sample_id in sorted(assignments)
     ]
@@ -176,7 +108,7 @@ def validate_split_table(
     *,
     config: SplitConfig | None = None,
 ) -> None:
-    """Validate split identities, coverage, ordering, and patient isolation."""
+    """Validate split coverage, ordering, declared recipe, and patient isolation."""
     try:
         require_exact_schema(splits, RSNA_SPLIT_SCHEMA, "RSNA splits")
     except ValueError as exc:
@@ -194,28 +126,9 @@ def validate_split_table(
             f"Split coverage mismatch: missing={len(expected_ids - set(split_ids))}, "
             f"extra={len(set(split_ids) - expected_ids)}"
         )
-    for field in ("split_recipe_id", "cohort_fingerprint", "split_assignment_id"):
-        values = {row[field] for row in split_rows}
-        if len(values) != 1 or not next(iter(values)):
-            raise ManifestBuildError(f"Split rows must share one non-empty {field}")
-    sources = {row["split_source"] for row in split_rows}
-    if sources != {SPLIT_SOURCE}:
-        raise ManifestBuildError(f"Unexpected split_source values: {sorted(sources)}")
-
-    declared_cohort = split_rows[0]["cohort_fingerprint"]
-    actual_cohort = cohort_fingerprint(samples, labels)
-    if declared_cohort != actual_cohort:
-        raise ManifestBuildError("Split cohort fingerprint does not match samples and labels")
     assignments = {row["sample_id"]: row["split_name"] for row in split_rows}
-    declared_recipe = split_rows[0]["split_recipe_id"]
-    declared_assignment = split_rows[0]["split_assignment_id"]
-    actual_assignment = split_assignment_id(declared_recipe, actual_cohort, assignments)
-    if declared_assignment != actual_assignment:
-        raise ManifestBuildError("Split assignment identity does not match split rows")
     if config is not None:
         config.validate()
-        if declared_recipe != config.recipe_id:
-            raise ManifestBuildError("Split recipe identity does not match declared split policy")
         expected_assignments = _create_assignments(samples, labels, config)
         if assignments != expected_assignments:
             raise ManifestBuildError("Split rows do not match the declared split recipe")
@@ -341,7 +254,7 @@ def _allocate_counts(total: int, ratios: tuple[float, float, float]) -> tuple[in
     return counts[0], counts[1], counts[2]
 
 
-def _identity(prefix: str, payload: dict[str, Any]) -> str:
+def _identity(prefix: str, payload: Any) -> str:
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()

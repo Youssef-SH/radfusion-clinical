@@ -21,8 +21,12 @@ def sha256_file(path: str | Path) -> str:
 
 
 def arrow_ipc_sha256(table: pa.Table) -> str:
-    """Hash ordered Arrow IPC bytes, including schema, with SHA-256."""
+    """Hash canonical ordered Arrow content and its exact schema with SHA-256."""
+    canonical = pa.Table.from_arrays(
+        [pa.array(table.column(field.name).to_pylist(), type=field.type) for field in table.schema],
+        schema=table.schema,
+    )
     sink = pa.BufferOutputStream()
-    with ipc.new_stream(sink, table.schema) as writer:
-        writer.write_table(table)
+    with ipc.new_stream(sink, canonical.schema) as writer:
+        writer.write_table(canonical)
     return hashlib.sha256(sink.getvalue().to_pybytes()).hexdigest()

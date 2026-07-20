@@ -32,6 +32,7 @@ BINARY_FEATURES = (
 )
 SOURCE_FEATURES = (
     "age_years",
+    "age_is_implausible",
     "sex",
     "view_position",
     "pixel_spacing_row_mm",
@@ -53,8 +54,14 @@ class RsnaMetadataFeatures(BaseEstimator, TransformerMixin):
         transformed = features.loc[:, SOURCE_FEATURES].copy()
         age = pd.to_numeric(transformed["age_years"], errors="coerce")
         transformed["age_model_years"] = age.clip(lower=0.0, upper=120.0)
-        transformed["age_is_implausible"] = (age > 120.0).astype("int8")
-        for column in SOURCE_FEATURES:
+        transformed["age_is_implausible"] = transformed["age_is_implausible"].astype("int8")
+        for column in (
+            "age_years",
+            "sex",
+            "view_position",
+            "pixel_spacing_row_mm",
+            "pixel_spacing_col_mm",
+        ):
             transformed[f"{column}_missing"] = transformed[column].isna().astype("int8")
         return transformed.loc[:, [*CONTINUOUS_FEATURES, *CATEGORICAL_FEATURES, *BINARY_FEATURES]]
 
@@ -65,6 +72,9 @@ class RsnaMetadataFeatures(BaseEstimator, TransformerMixin):
         missing = sorted(set(SOURCE_FEATURES) - set(features.columns))
         if missing:
             raise ValueError(f"RSNA metadata is missing required columns: {missing}")
+        unexpected = sorted(set(features.columns) - set(SOURCE_FEATURES))
+        if unexpected:
+            raise ValueError(f"RSNA metadata contains unexpected columns: {unexpected}")
 
 
 def build_rsna_preprocessor() -> Pipeline:
@@ -104,6 +114,7 @@ def fit_rsna_preprocessor(samples: pa.Table, splits: pa.Table) -> Pipeline:
     training = sample_frame.merge(assignments, on="sample_id", validate="one_to_one")
     if training.empty:
         raise ManifestBuildError("Cannot fit metadata preprocessing without training samples")
+    training = training.loc[:, SOURCE_FEATURES]
     pipeline = build_rsna_preprocessor()
     pipeline.fit(training)
     return pipeline

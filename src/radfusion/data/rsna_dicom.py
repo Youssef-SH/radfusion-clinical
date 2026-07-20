@@ -140,8 +140,6 @@ def read_dicom_metadata(path: Path) -> DicomMetadata:
     )
 
     audit_keywords = (
-        "Rows",
-        "Columns",
         "PhotometricInterpretation",
         "SOPClassUID",
         "SamplesPerPixel",

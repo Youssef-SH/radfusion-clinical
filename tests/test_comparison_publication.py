@@ -1,115 +1,171 @@
 from __future__ import annotations
 
+import math
+import subprocess
+import sys
 from pathlib import Path
 
+import mlflow
 import pandas as pd
-import pytest
 
-from radfusion.evaluation.metrics import evaluate_binary
-from radfusion.training.config import load_experiment_config
-from radfusion.training.train_tabular import ModelResult, _write_comparison_table
+from radfusion.training.compare import COMPARISON_COLUMNS, regenerate_comparison
+from radfusion.utils.mlflow_utils import configure_mlflow
 
 
-def _result(tmp_path: Path, *, run_id: str = "run-test") -> ModelResult:
-    metrics = evaluate_binary([0, 0, 1, 1], [0.1, 0.3, 0.6, 0.9], threshold=0.5)
-    return ModelResult(
-        model_name="metadata_logistic_regression",
-        run_id=run_id,
-        youden_j_threshold=0.5,
-        target_sensitivity_threshold=0.4,
-        validation_youden_j=metrics,
-        test_youden_j=metrics,
-        validation_target_sensitivity=metrics,
-        test_target_sensitivity=metrics,
-        model_path=tmp_path / "model" / "runs" / run_id / "model.skops",
-        model_artifact_sha256="model-sha",
-        artifact_directory=tmp_path / "artifacts",
-        latency_ms=1.0,
-        model_size_mib=2.0,
+def _tracking_uri(tmp_path: Path) -> str:
+    return f"sqlite:///{(tmp_path / 'mlflow.db').as_posix()}"
+
+
+def _run(
+    *,
+    scope: str,
+    complete: bool = True,
+    status: str = "FINISHED",
+    omit_metric: str | None = None,
+    parent_training_run_id: str | None = None,
+    metric_override: tuple[str, float] | None = None,
+    tag_override: tuple[str, str] | None = None,
+) -> str:
+    kind = "training" if scope == "validation" else "test_evaluation"
+    parent = (
+        parent_training_run_id
+        if parent_training_run_id is not None
+        else ("parent" if scope == "test" else "")
     )
-
-
-def _lineage() -> dict[str, object]:
-    return {
-        "bundle_id": "bundle",
+    tags = {
+        "run_kind": kind,
+        "run_complete": str(complete).lower(),
+        "evaluation_scope": scope,
+        "experiment_name": "experiment",
+        "model": "metadata_logistic",
+        "dataset_bundle_id": "bundle",
         "split_assignment_id": "assignment",
-        "split_recipe_id": "recipe",
-        "cohort_fingerprint": "cohort",
-        "git_commit": "commit",
-        "git_dirty": False,
-        "git_source_state_sha256": "clean",
-        "uv_lock_sha256": "lock",
+        "seed": "42",
+        "source_training_run_id": parent,
     }
+    if tag_override is not None:
+        tags[tag_override[0]] = tag_override[1]
+    with mlflow.start_run(tags=tags) as run:
+        metrics = {
+            f"{scope}_average_precision": 0.4,
+            f"{scope}_roc_auc": 0.7,
+            f"{scope}_brier_score": 0.2,
+            f"{scope}_expected_calibration_error": 0.1,
+            f"{scope}_calibration_slope": 1.0,
+            f"{scope}_calibration_intercept": 0.0,
+            f"{scope}_youden_j_threshold": 0.5,
+            f"{scope}_youden_j_precision": 0.6,
+            f"{scope}_youden_j_recall": 0.7,
+            f"{scope}_youden_j_specificity": 0.8,
+            f"{scope}_youden_j_f1": 0.65,
+            f"{scope}_target_sensitivity_threshold": 0.3,
+            f"{scope}_target_sensitivity_precision": 0.4,
+            f"{scope}_target_sensitivity_recall": 0.9,
+            f"{scope}_target_sensitivity_specificity": 0.3,
+            f"{scope}_target_sensitivity_f1": 0.55,
+            f"{scope}_latency_ms": 1.0,
+            "model_size_mib": 2.0,
+        }
+        if omit_metric is not None:
+            metrics.pop(omit_metric)
+        if metric_override is not None:
+            metrics[metric_override[0]] = metric_override[1]
+        mlflow.log_metrics(metrics)
+        run_id = run.info.run_id
+        if status == "FAILED":
+            mlflow.end_run(status="FAILED")
+    return run_id
 
 
-def test_comparison_table_uses_semantic_experiment_key_and_exact_lineage(tmp_path: Path) -> None:
-    path = tmp_path / "model_comparison_table.csv"
-    config = load_experiment_config("configs/metadata_logistic.yaml")
-    _write_comparison_table(_result(tmp_path), config, _lineage(), path)
-    _write_comparison_table(_result(tmp_path, run_id="replacement"), config, _lineage(), path)
+def test_comparison_is_regenerated_from_complete_mlflow_runs(tmp_path: Path) -> None:
+    tracking_uri = _tracking_uri(tmp_path)
+    configure_mlflow(experiment_name="comparison-test", tracking_uri=tracking_uri)
+    validation_id = _run(scope="validation")
+    test_id = _run(scope="test", parent_training_run_id=validation_id)
 
-    table = pd.read_csv(path)
-    assert len(table) == 1
-    current = table.iloc[0]
-    assert current["experiment_config_sha256"] == config.source_sha256
-    assert current["mlflow_run_id"] == "replacement"
-    assert current["split_assignment_id"] == "assignment"
-    assert current["local_model_sha256"] == "model-sha"
-    assert "test_target_sensitivity_recall" in table.columns
-    assert "validation_average_precision" in table.columns
-    assert "pr_auc" not in " ".join(table.columns).lower()
-    assert path.with_suffix(".csv.lock").is_file()
-
-
-def test_comparison_table_keeps_distinct_semantic_experiments(tmp_path: Path) -> None:
-    path = tmp_path / "model_comparison_table.csv"
-    config = load_experiment_config("configs/metadata_logistic.yaml")
-    _write_comparison_table(_result(tmp_path), config, _lineage(), path)
-    second_lineage = {**_lineage(), "split_assignment_id": "assignment-2"}
-    _write_comparison_table(_result(tmp_path, run_id="run-2"), config, second_lineage, path)
-    assert len(pd.read_csv(path)) == 2
-
-
-def test_comparison_table_distinguishes_dirty_source_states(tmp_path: Path) -> None:
-    path = tmp_path / "model_comparison_table.csv"
-    config = load_experiment_config("configs/metadata_logistic.yaml")
-    first = {**_lineage(), "git_dirty": True, "git_source_state_sha256": "source-a"}
-    second = {**first, "git_source_state_sha256": "source-b"}
-
-    _write_comparison_table(_result(tmp_path), config, first, path)
-    _write_comparison_table(_result(tmp_path, run_id="run-2"), config, second, path)
-
-    assert len(pd.read_csv(path)) == 2
-
-
-def test_comparison_table_failure_preserves_previous_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    path = tmp_path / "model_comparison_table.csv"
-    previous = "dataset,task,model_name\nother,task,previous\n"
-    path.write_text(previous, encoding="utf-8")
-    config = load_experiment_config("configs/metadata_logistic.yaml")
-
-    def fail_write(*args, **kwargs) -> None:
-        raise RuntimeError("CSV generation failed")
-
-    monkeypatch.setattr(pd.DataFrame, "to_csv", fail_write)
-    with pytest.raises(RuntimeError, match="CSV generation failed"):
-        _write_comparison_table(_result(tmp_path), config, _lineage(), path)
-    assert path.read_text(encoding="utf-8") == previous
-    assert not list(tmp_path.glob(".model_comparison_table.csv-*.tmp"))
-
-
-def test_comparison_table_preserves_unrelated_columns(tmp_path: Path) -> None:
-    path = tmp_path / "model_comparison_table.csv"
-    pd.DataFrame([{"dataset": "other", "private_note": "preserve"}]).to_csv(path, index=False)
-
-    _write_comparison_table(
-        _result(tmp_path),
-        load_experiment_config("configs/metadata_logistic.yaml"),
-        _lineage(),
-        path,
+    csv_path, markdown_path, count = regenerate_comparison(
+        tracking_uri=tracking_uri,
+        output_directory=tmp_path / "reports",
     )
 
-    table = pd.read_csv(path)
-    assert table.loc[table["dataset"] == "other", "private_note"].iloc[0] == "preserve"
+    table = pd.read_csv(csv_path)
+    assert count == 2
+    assert list(table.columns) == list(COMPARISON_COLUMNS)
+    assert set(table["run_id"]) == {validation_id, test_id}
+    assert table.loc[table["run_id"] == test_id, "parent_training_run_id"].iloc[0] == validation_id
+    assert "Metadata experiment comparison" in markdown_path.read_text(encoding="utf-8")
+
+
+def test_comparison_excludes_failed_and_incomplete_runs(tmp_path: Path) -> None:
+    tracking_uri = _tracking_uri(tmp_path)
+    configure_mlflow(experiment_name="comparison-test", tracking_uri=tracking_uri)
+    included = _run(scope="validation")
+    _run(scope="validation", complete=False)
+    _run(scope="test", status="FAILED", parent_training_run_id=included)
+    _run(scope="validation", omit_metric="validation_brier_score")
+    _run(scope="test", parent_training_run_id="")
+    _run(scope="test", parent_training_run_id="missing")
+    _run(
+        scope="test",
+        parent_training_run_id=included,
+        tag_override=("dataset_bundle_id", "different"),
+    )
+    _run(
+        scope="validation",
+        metric_override=("validation_average_precision", math.nan),
+    )
+
+    csv_path, _, count = regenerate_comparison(
+        tracking_uri=tracking_uri,
+        output_directory=tmp_path / "reports",
+    )
+
+    table = pd.read_csv(csv_path)
+    assert count == 1
+    assert table["run_id"].tolist() == [included]
+
+
+def test_comparison_regeneration_is_deterministic(tmp_path: Path) -> None:
+    tracking_uri = _tracking_uri(tmp_path)
+    configure_mlflow(experiment_name="comparison-test", tracking_uri=tracking_uri)
+    validation_id = _run(scope="validation")
+    _run(scope="test", parent_training_run_id=validation_id)
+    output = tmp_path / "reports"
+
+    csv_path, _, _ = regenerate_comparison(
+        tracking_uri=tracking_uri,
+        output_directory=output,
+    )
+    first = csv_path.read_bytes()
+    regenerate_comparison(
+        tracking_uri=tracking_uri,
+        output_directory=output,
+    )
+
+    table = pd.read_csv(csv_path)
+    assert table["evaluation_scope"].tolist() == ["test", "validation"]
+    assert first == csv_path.read_bytes()
+
+
+def test_comparison_cli_initializes_sqlite_in_a_fresh_process(tmp_path: Path) -> None:
+    database = tmp_path / "mlflow.db"
+    output = tmp_path / "reports"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "radfusion.training.compare",
+            "--tracking-uri",
+            f"sqlite:///{database.as_posix()}",
+            "--output-directory",
+            str(output),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Generated 0 rows" in completed.stdout
+    assert database.is_file()
+    assert (output / "model_comparison_table.csv").is_file()

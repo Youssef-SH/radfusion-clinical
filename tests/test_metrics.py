@@ -41,6 +41,35 @@ def test_thresholds_are_derived_from_validation_probabilities() -> None:
     )
 
 
+def test_threshold_selection_enumerates_all_roc_candidates(monkeypatch) -> None:
+    calls: list[bool] = []
+
+    def fake_roc_curve(truth, scores, *, drop_intermediate):
+        calls.append(drop_intermediate)
+        return (
+            np.asarray([0.0, 0.2, 0.4]),
+            np.asarray([0.0, 0.8, 1.0]),
+            np.asarray([float("inf"), 0.7, 0.4]),
+        )
+
+    monkeypatch.setattr("radfusion.evaluation.metrics.roc_curve", fake_roc_curve)
+    assert youden_j_threshold([0, 1], [0.1, 0.9]) == pytest.approx(0.7)
+    assert target_sensitivity_threshold([0, 1], [0.1, 0.9], sensitivity=0.8) == pytest.approx(0.7)
+    assert calls == [False, False]
+
+
+def test_youden_ties_select_the_highest_finite_threshold(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "radfusion.evaluation.metrics.roc_curve",
+        lambda *args, **kwargs: (
+            np.asarray([0.0, 0.25, 0.5]),
+            np.asarray([0.0, 0.75, 1.0]),
+            np.asarray([float("inf"), 0.8, 0.6]),
+        ),
+    )
+    assert youden_j_threshold([0, 1], [0.1, 0.9]) == pytest.approx(0.8)
+
+
 @pytest.mark.parametrize(
     "targets",
     [

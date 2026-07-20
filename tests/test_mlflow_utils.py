@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import subprocess
 from pathlib import Path
 
-from radfusion.utils.mlflow_utils import uv_lock_sha256, write_dirty_source_snapshot
+import mlflow
+import pytest
 
-
-def _git(root: Path, *arguments: str) -> None:
-    subprocess.run(["git", *arguments], cwd=root, check=True, capture_output=True)
+from radfusion.utils.mlflow_utils import configure_mlflow, uv_lock_sha256
 
 
 def test_uv_lock_hash_uses_exact_file_bytes(tmp_path: Path) -> None:
@@ -19,39 +17,62 @@ def test_uv_lock_hash_uses_exact_file_bytes(tmp_path: Path) -> None:
     assert uv_lock_sha256(lock) == hashlib.sha256(content).hexdigest()
 
 
-def test_dirty_source_snapshot_captures_reconstructing_state_and_excludes_ignored_files(
-    tmp_path: Path, monkeypatch
-) -> None:
-    _git(tmp_path, "init", "-q")
-    (tmp_path / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
-    (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
-    _git(tmp_path, "add", ".gitignore", "README.md")
-    _git(
-        tmp_path,
-        "-c",
-        "user.name=RadFusion Test",
-        "-c",
-        "user.email=test@example.invalid",
-        "commit",
-        "-qm",
-        "base",
+def test_mlflow_initialization_uses_isolated_sqlite_and_local_artifacts(tmp_path: Path) -> None:
+    database = tmp_path / "mlflow.db"
+    tracking_uri = f"sqlite:///{database.as_posix()}"
+
+    client = configure_mlflow(experiment_name="test-experiment", tracking_uri=tracking_uri)
+    with mlflow.start_run() as run:
+        artifact = tmp_path / "artifact.txt"
+        artifact.write_text("artifact\n", encoding="utf-8")
+        mlflow.log_artifact(artifact)
+
+    experiment = client.get_experiment(run.info.experiment_id)
+    assert database.is_file()
+    assert experiment.artifact_location == (tmp_path / "mlartifacts").as_uri()
+    assert Path(client.download_artifacts(run.info.run_id, "artifact.txt")).read_bytes() == (
+        artifact.read_bytes()
     )
-    (tmp_path / "README.md").write_text("changed\n", encoding="utf-8")
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "new.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (tmp_path / "ignored.txt").write_text("secret\n", encoding="utf-8")
-    (tmp_path / "unrelated.bin").write_bytes(b"not source")
-    monkeypatch.chdir(tmp_path)
 
-    snapshot = write_dirty_source_snapshot(tmp_path / "snapshot")
-    document = json.loads((snapshot / "snapshot_manifest.json").read_text(encoding="utf-8"))
 
-    assert b"changed" in (snapshot / "tracked.diff").read_bytes()
-    assert document["untracked_files"] == ["src/new.py"]
-    assert document["untracked_file_sha256"] == {
-        "src/new.py": hashlib.sha256(b"VALUE = 1\n").hexdigest()
-    }
-    assert len(document["source_state_sha256"]) == 64
-    assert (snapshot / "untracked" / "src" / "new.py").is_file()
-    assert not (snapshot / "untracked" / "ignored.txt").exists()
-    assert not (snapshot / "untracked" / "unrelated.bin").exists()
+@pytest.mark.parametrize(
+    "tracking_uri",
+    ["file:///tmp/mlruns", "sqlite:///:memory:", "sqlite:///"],
+)
+def test_mlflow_initialization_rejects_nonpersistent_local_backends(tracking_uri: str) -> None:
+    with pytest.raises(ValueError, match="SQLite|sqlite"):
+        configure_mlflow(tracking_uri=tracking_uri)
+
+
+def test_make_clean_removes_sqlite_state_and_preserves_raw_data(tmp_path: Path) -> None:
+    for name in (
+        "mlflow.db",
+        "mlflow.db-wal",
+        "mlflow.db-shm",
+        "mlartifacts/run/artifact.txt",
+        "data/manifests/rsna/builds/build-test/artifact",
+        "data/manifests/rsna/CURRENT",
+    ):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("generated\n", encoding="utf-8")
+    raw = tmp_path / "data/raw/rsna/source.dcm"
+    raw.parent.mkdir(parents=True)
+    raw.write_text("source\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        ["make", "-f", str(Path("Makefile").resolve()), "clean"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert raw.is_file()
+    assert not (tmp_path / "mlflow.db").exists()
+    assert not (tmp_path / "mlflow.db-wal").exists()
+    assert not (tmp_path / "mlflow.db-shm").exists()
+    assert not (tmp_path / "mlartifacts").exists()
+    assert not (tmp_path / "data/manifests/rsna/CURRENT").exists()
+    assert not (tmp_path / "data/manifests/rsna/builds/build-test").exists()

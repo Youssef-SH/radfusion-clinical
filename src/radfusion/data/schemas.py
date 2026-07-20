@@ -17,14 +17,14 @@ RSNA_CLASS_LABEL_POLICY_VERSION = "rsna-stage-2-class-v1"
 
 RSNA_SAMPLE_SCHEMA = pa.schema(
     [
-        pa.field("dataset_id", pa.string(), nullable=False),
         pa.field("sample_id", pa.string(), nullable=False),
         pa.field("patient_id", pa.string(), nullable=False),
-        pa.field("study_id", pa.string(), nullable=True),
         pa.field("image_id", pa.string(), nullable=False),
         pa.field("image_path", pa.string(), nullable=False),
-        pa.field("split", pa.string(), nullable=True),
+        pa.field("image_rows", pa.int32(), nullable=False),
+        pa.field("image_columns", pa.int32(), nullable=False),
         pa.field("age_years", pa.float64(), nullable=True),
+        pa.field("age_is_implausible", pa.bool_(), nullable=False),
         pa.field("sex", pa.string(), nullable=True),
         pa.field("view_position", pa.string(), nullable=True),
         pa.field("pixel_spacing_row_mm", pa.float64(), nullable=True),
@@ -34,19 +34,14 @@ RSNA_SAMPLE_SCHEMA = pa.schema(
 
 RSNA_LABEL_SCHEMA = pa.schema(
     [
-        pa.field("dataset_id", pa.string(), nullable=False),
         pa.field("sample_id", pa.string(), nullable=False),
         pa.field("task_id", pa.string(), nullable=False),
         pa.field("label_value", pa.int8(), nullable=False),
-        pa.field("label_status", pa.string(), nullable=False),
-        pa.field("label_source", pa.string(), nullable=False),
-        pa.field("label_policy_version", pa.string(), nullable=False),
     ]
 )
 
 RSNA_ANNOTATION_SCHEMA = pa.schema(
     [
-        pa.field("dataset_id", pa.string(), nullable=False),
         pa.field("sample_id", pa.string(), nullable=False),
         pa.field("annotation_id", pa.string(), nullable=False),
         pa.field("x", pa.float64(), nullable=False),
@@ -58,19 +53,13 @@ RSNA_ANNOTATION_SCHEMA = pa.schema(
 
 RSNA_SPLIT_SCHEMA = pa.schema(
     [
-        pa.field("dataset_id", pa.string(), nullable=False),
         pa.field("sample_id", pa.string(), nullable=False),
         pa.field("split_name", pa.string(), nullable=False),
-        pa.field("split_recipe_id", pa.string(), nullable=False),
-        pa.field("cohort_fingerprint", pa.string(), nullable=False),
-        pa.field("split_assignment_id", pa.string(), nullable=False),
-        pa.field("split_source", pa.string(), nullable=False),
     ]
 )
 
 RSNA_SOURCE_INVENTORY_SCHEMA = pa.schema(
     [
-        pa.field("dataset_id", pa.string(), nullable=False),
         pa.field("sample_id", pa.string(), nullable=False),
         pa.field("relative_path", pa.string(), nullable=False),
         pa.field("byte_size", pa.int64(), nullable=False),

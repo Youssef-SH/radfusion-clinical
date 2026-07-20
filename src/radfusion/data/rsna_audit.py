@@ -14,7 +14,7 @@ import pyarrow.parquet as pq
 
 from radfusion.data.rsna_artifacts import load_current_bundle
 from radfusion.data.rsna_source import RSNA_CLASS_VALUES, ManifestBuildError
-from radfusion.data.splitting import SPLIT_NAMES, validate_split_table
+from radfusion.data.splitting import SPLIT_NAMES
 from radfusion.utils.privacy import validate_public_reports
 from radfusion.utils.publication import publish_directory, staging_directory
 
@@ -25,6 +25,7 @@ REPORT_FILENAMES = (
     "age_distribution.csv",
     "sex_distribution.csv",
     "view_distribution.csv",
+    "image_dimensions.csv",
     "pixel_spacing.csv",
     "bbox_statistics.csv",
     "missingness_report.md",
@@ -34,7 +35,7 @@ _AGE_LABELS = ("<18", "18-<40", "40-<60", "60-<80", "80-120", ">120")
 
 def generate_rsna_audit(
     manifest_directory: str | Path = "data/manifests",
-    output_directory: str | Path = "reports/rsna",
+    output_directory: str | Path = "reports/rsna/audit",
 ) -> dict[str, object]:
     """Generate deterministic aggregate reports for the current RSNA bundle."""
     bundle = load_current_bundle(manifest_directory)
@@ -42,7 +43,6 @@ def generate_rsna_audit(
     labels = pq.read_table(bundle.labels_path)
     annotations = pq.read_table(bundle.annotations_path)
     splits = pq.read_table(bundle.splits_path)
-    validate_split_table(splits, samples, labels)
     metadata = json.loads(bundle.metadata_path.read_text(encoding="utf-8"))
 
     sample_frame = samples.to_pandas()
@@ -51,18 +51,15 @@ def generate_rsna_audit(
     split_frame = splits.to_pandas()
     frame = _audit_frame(sample_frame, label_frame, split_frame)
 
-    output = Path(output_directory)
+    output = Path(output_directory) / bundle.bundle_id
     stage = staging_directory(output)
     try:
-        if output.is_dir():
-            for child in output.iterdir():
-                if child.is_dir():
-                    shutil.copytree(child, stage / child.name)
         tables = {
             "label_distribution.csv": _label_distribution(label_frame, split_frame),
             "age_distribution.csv": _age_distribution(frame),
             "sex_distribution.csv": _category_distribution(frame, "sex"),
             "view_distribution.csv": _category_distribution(frame, "view_position"),
+            "image_dimensions.csv": _image_dimensions_distribution(frame),
             "pixel_spacing.csv": _pixel_spacing_distribution(frame),
             "bbox_statistics.csv": _bbox_statistics(frame, annotation_frame),
         }
@@ -90,9 +87,8 @@ def generate_rsna_audit(
 
     return {
         "bundle_id": bundle.bundle_id,
-        "split_recipe_id": str(split_frame["split_recipe_id"].iloc[0]),
-        "cohort_fingerprint": str(split_frame["cohort_fingerprint"].iloc[0]),
-        "split_assignment_id": str(split_frame["split_assignment_id"].iloc[0]),
+        "split_recipe_id": str(metadata["split"]["split_recipe_id"]),
+        "split_assignment_id": str(metadata["split"]["split_assignment_id"]),
         "report_directory": output.as_posix(),
         "reports": list(REPORT_FILENAMES),
     }
@@ -190,6 +186,22 @@ def _pixel_spacing_distribution(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame.from_records(records)
 
 
+def _image_dimensions_distribution(frame: pd.DataFrame) -> pd.DataFrame:
+    records: list[dict[str, object]] = []
+    for scope, scoped in _scopes(frame):
+        grouped = scoped[["image_rows", "image_columns"]].value_counts(sort=False).sort_index()
+        for (rows, columns), count in grouped.items():
+            records.append(
+                {
+                    "scope": scope,
+                    "image_rows": int(rows),
+                    "image_columns": int(columns),
+                    "count": int(count),
+                }
+            )
+    return pd.DataFrame.from_records(records)
+
+
 def _bbox_statistics(frame: pd.DataFrame, annotations: pd.DataFrame) -> pd.DataFrame:
     box_counts = annotations.groupby("sample_id").size().rename("bbox_count")
     with_boxes = frame.join(box_counts, on="sample_id").fillna({"bbox_count": 0})
@@ -245,7 +257,6 @@ def _split_summary(metadata: dict[str, object], frame: pd.DataFrame) -> str:
         "# RSNA split summary",
         "",
         f"Split recipe ID: `{split_metadata['split_recipe_id']}`",
-        f"Cohort fingerprint: `{split_metadata['cohort_fingerprint']}`",
         f"Split assignment ID: `{split_metadata['split_assignment_id']}`",
         "",
         "| Split | Samples | Patients | Positive | Negative | Positive rate |",
@@ -317,8 +328,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-directory",
         type=Path,
-        default=Path("reports/rsna"),
-        help="Directory for generated audit reports",
+        default=Path("reports/rsna/audit"),
+        help="Root directory for bundle-specific audit reports",
     )
     return parser
 

@@ -13,8 +13,8 @@ RadFusion-Clinical is a reproducible machine-learning benchmark and experimentat
 - Content-addressed immutable bundles with exact schemas and integrity validation
 - Metadata preprocessing fitted on the training split and fixed Logistic Regression and LightGBM
   baselines
-- Binary evaluation metrics and MLflow experiment lineage
-- Immutable run-qualified model artifacts with exact source, dependency-lock, and run lineage
+- Separate validation and explicit test-evaluation runs with MLflow lineage
+- Compact run-qualified model packages with exact config and model bytes
 - Ruff, pytest, pre-commit, and continuous-integration checks
 
 ## Setup
@@ -37,23 +37,29 @@ to `data/raw/rsna/extracted/`. The required filenames and directory layout are d
 
 ```bash
 make rsna-manifest   # publish an RSNA bundle
-make rsna-audit      # generate aggregate dataset reports under reports/rsna
+make rsna-audit      # generate reports under reports/rsna/audit/<bundle-id>
 make train CONFIG=configs/metadata_logistic.yaml
 make train CONFIG=configs/metadata_lightgbm.yaml
+make evaluate RUN_ID=<training-run-id>
+make compare         # regenerate CSV and Markdown comparison views from MLflow
 make clean           # remove reproducible outputs while preserving raw datasets
 make check           # lock consistency, Ruff checks, and unit/contract tests
 make pre-commit      # run repository hooks against all tracked files
 make inspect FILE=path/to/image.dcm
 ```
 
+Replace `<training-run-id>` with the run ID printed by `make train`; do not type the angle
+brackets. MLflow metadata is stored in `mlflow.db`, and run artifacts are stored under
+`mlartifacts/`.
+
 Every executable experiment is declared by a validated YAML file under `configs/`. See
 [`docs/training.md`](docs/training.md) for the training workflow.
 
 ## Cleaning generated artifacts
 
-Run `make clean` to remove generated reports, models, experiment state, Python caches, and bundles.
-Git ignores these outputs, and the pipeline regenerates them from source data. Raw source datasets
-remain under `data/raw/`.
+Run `make clean` to remove generated reports, models, MLflow database and artifacts, Python
+caches, and bundles. Git ignores these outputs, and the pipeline regenerates them from source
+data. Raw source datasets remain under `data/raw/`.
 
 ## Repository layout
 

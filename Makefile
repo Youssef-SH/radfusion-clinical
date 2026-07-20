@@ -1,5 +1,5 @@
 .PHONY: sync lock-check lint format format-check test check inspect rsna-manifest rsna-audit \
-	train pre-commit clean
+	train evaluate compare pre-commit clean
 
 # Cleanup searches preserve repository metadata, environments, and source data.
 CLEAN_FIND_PRUNE = \( -path './.git' -o -path './.venv' -o -path './data/raw' \) -prune -o
@@ -38,13 +38,20 @@ train:
 	@test -f "$(CONFIG)" || (echo "Experiment config not found: $(CONFIG)"; exit 2)
 	uv run python -m radfusion.training.train --config "$(CONFIG)"
 
+evaluate:
+	@test -n "$(RUN_ID)" || (echo "RUN_ID=<training-run-id> is required"; exit 2)
+	uv run python -m radfusion.training.evaluate --run-id "$(RUN_ID)"
+
+compare:
+	uv run python -m radfusion.training.compare
+
 pre-commit:
 	uv run pre-commit run --all-files
 
 clean:
 	@set -eu; \
 	output_count=0; \
-	for path in reports models mlruns mlartifacts; do \
+	for path in reports models mlartifacts mlflow.db mlflow.db-wal mlflow.db-shm; do \
 		if [ -e "$$path" ]; then rm -rf -- "$$path"; output_count=$$((output_count + 1)); fi; \
 	done; \
 	cache_count=0; \

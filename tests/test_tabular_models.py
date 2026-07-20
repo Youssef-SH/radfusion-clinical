@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import replace
 from types import MappingProxyType
 
-import mlflow
-import mlflow.sklearn
 import numpy as np
 import pandas as pd
 import pytest
@@ -12,15 +10,9 @@ import skops.io as sio
 
 from radfusion.models.tabular_baseline import MetadataLightgbmModel, MetadataLogisticModel
 from radfusion.training.config import load_experiment_config
-from radfusion.training.registry import MODEL_REGISTRY, register_builtin_components
-from radfusion.training.train_tabular import _logged_parameters
-from radfusion.utils.mlflow_utils import (
-    configure_mlflow,
-    cpu_model,
-    environment_provenance,
-    tracked_run,
-)
-from radfusion.utils.skops_io import load_skops, save_skops, trusted_types_for_file
+from radfusion.training.registry import get_model
+from radfusion.utils.mlflow_utils import cpu_model, environment_provenance
+from radfusion.utils.skops_io import load_skops, save_skops
 
 
 def _features() -> tuple[pd.DataFrame, np.ndarray]:
@@ -30,6 +22,7 @@ def _features() -> tuple[pd.DataFrame, np.ndarray]:
         pd.DataFrame(
             {
                 "age_years": np.linspace(20.0, 80.0, size),
+                "age_is_implausible": [False] * size,
                 "sex": ["F", "M"] * (size // 2),
                 "view_position": ["PA", "AP"] * (size // 2),
                 "pixel_spacing_row_mm": np.linspace(0.14, 0.20, size),
@@ -43,8 +36,7 @@ def _features() -> tuple[pd.DataFrame, np.ndarray]:
 def _fit_registered_model(config_path: str, *, seed: int | None = None):
     config = load_experiment_config(config_path)
     features, target = _features()
-    register_builtin_components()
-    fitted = MODEL_REGISTRY.get(config.model.registry_key).fit(
+    fitted = get_model(config.model.registry_key).fit(
         config.model,
         config.training.seed if seed is None else seed,
         features,
@@ -123,33 +115,6 @@ def test_skops_loader_rejects_unapproved_types(tmp_path) -> None:
         load_skops(path)
 
 
-def test_mlflow_helper_records_parameters_tags_and_skops_model(tmp_path) -> None:
-    _, features, _, fitted = _fit_registered_model("configs/metadata_logistic.yaml")
-    model = fitted.pipeline
-    model_path = save_skops(model, tmp_path / "model.skops")
-    configure_mlflow(experiment_name="test-experiment", tracking_directory=tmp_path / "mlruns")
-    with tracked_run(
-        run_name="test-run",
-        tags={"dataset": "synthetic", "dataset_bundle_id": "bundle-test"},
-        parameters={"seed": 42, "image_size": None},
-    ) as run_id:
-        mlflow.log_metric("average_precision", 0.75)
-        model_info = mlflow.sklearn.log_model(
-            model,
-            name="model",
-            serialization_format="skops",
-            skops_trusted_types=trusted_types_for_file(model_path),
-        )
-
-    run = mlflow.get_run(run_id)
-    restored = mlflow.sklearn.load_model(model_info.model_uri)
-    assert run.data.tags["dataset_bundle_id"] == "bundle-test"
-    assert run.data.params["seed"] == "42"
-    assert run.data.params["image_size"] == "not_applicable"
-    assert run.data.metrics["average_precision"] == 0.75
-    np.testing.assert_array_equal(restored.predict_proba(features), model.predict_proba(features))
-
-
 def test_environment_provenance_contains_required_runtime_versions() -> None:
     assert set(environment_provenance()) == {
         "environment_python_version",
@@ -209,7 +174,7 @@ def test_logistic_model_rejects_weighting_parameter_conflicts(key: str) -> None:
         config,
         parameters=MappingProxyType({**config.parameters, key: "balanced"}),
     )
-    with pytest.raises(ValueError, match="controlled by class_weighting"):
+    with pytest.raises(ValueError, match="fixed by the model adapter"):
         MetadataLogisticModel().fit(invalid, 42, features, target, features, target)
 
 
@@ -221,7 +186,7 @@ def test_lightgbm_model_rejects_weighting_parameter_conflicts(key: str) -> None:
         config,
         parameters=MappingProxyType({**config.parameters, key: 1}),
     )
-    with pytest.raises(ValueError, match="controlled by class_weighting"):
+    with pytest.raises(ValueError, match="fixed by the model adapter"):
         MetadataLightgbmModel().fit(invalid, 42, features, target, features, target)
 
 
@@ -243,28 +208,3 @@ def test_training_seed_sets_estimator_random_state(config_path: str) -> None:
 
     assert first.pipeline.named_steps["classifier"].random_state == 42
     assert second.pipeline.named_steps["classifier"].random_state == 7
-
-
-def test_logged_seed_matches_resolved_estimator_random_state() -> None:
-    config = load_experiment_config("configs/metadata_logistic.yaml")
-    parameters = _logged_parameters(
-        config,
-        {
-            "train_positive_count": 20,
-            "train_negative_count": 20,
-            "config_path": config.source_path.as_posix(),
-            "config_sha256": config.source_sha256,
-            "uv_lock_sha256": "lock-hash",
-            "derived_parameters": {"estimator_random_state": config.training.seed},
-        },
-    )
-
-    assert parameters["training_seed"] == config.training.seed
-    assert parameters["estimator_random_state"] == config.training.seed
-
-
-def test_derived_model_parameters_are_immutable() -> None:
-    _, _, _, fitted = _fit_registered_model("configs/metadata_lightgbm.yaml")
-
-    with pytest.raises(TypeError):
-        fitted.derived_parameters["best_iteration"] = 999  # type: ignore[index]

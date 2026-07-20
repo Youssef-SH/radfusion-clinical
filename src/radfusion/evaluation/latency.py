@@ -28,6 +28,7 @@ def benchmark_single_sample_latency_ms(
     *,
     warmup_calls: int = LATENCY_WARMUP_CALLS,
     measured_calls: int = LATENCY_MEASURED_CALLS,
+    best_iteration: int | None = None,
 ) -> float:
     """Return median latency for repeated single-sample probability inference."""
     if not isinstance(features, pd.DataFrame) or features.empty:
@@ -39,11 +40,11 @@ def benchmark_single_sample_latency_ms(
 
     sample = features.iloc[[0]]
     for _ in range(warmup_calls):
-        positive_class_probabilities(model, sample)
+        positive_class_probabilities(model, sample, best_iteration=best_iteration)
 
     durations_ns = np.empty(measured_calls, dtype=np.int64)
     for index in range(measured_calls):
         start_ns = time.perf_counter_ns()
-        positive_class_probabilities(model, sample)
+        positive_class_probabilities(model, sample, best_iteration=best_iteration)
         durations_ns[index] = time.perf_counter_ns() - start_ns
     return float(np.median(durations_ns) / 1_000_000.0)

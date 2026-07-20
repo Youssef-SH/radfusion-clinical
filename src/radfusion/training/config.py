@@ -73,6 +73,7 @@ class DatasetConfig:
 
     registry_key: str
     manifest_directory: Path
+    bundle_id: str
     task_id: str
 
 
@@ -81,9 +82,6 @@ class ModelConfig:
     """Registered model and its declarative parameters."""
 
     registry_key: str
-    output_name: str
-    modality: str
-    class_weighting: str
     parameters: MappingProxyType[str, Any]
     fit_parameters: MappingProxyType[str, Any]
 
@@ -95,14 +93,12 @@ class TrainingConfig:
     seed: int
     report_directory: Path
     model_directory: Path
-    require_clean_git: bool
 
 
 @dataclass(frozen=True)
 class EvaluationConfig:
     """Evaluation policies shared by model implementations."""
 
-    threshold_policy: str
     sensitivity_target: float
     calibration_bins: int
     latency_warmup_calls: int
@@ -111,10 +107,9 @@ class EvaluationConfig:
 
 @dataclass(frozen=True)
 class MLflowConfig:
-    """MLflow experiment and tracking settings."""
+    """MLflow experiment identity."""
 
     experiment_name: str
-    tracking_directory: Path
 
 
 @dataclass(frozen=True)
@@ -123,13 +118,13 @@ class ExperimentConfig:
 
     config_version: int
     name: str
-    executable: bool
     dataset: DatasetConfig
     model: ModelConfig
     training: TrainingConfig
     evaluation: EvaluationConfig
     mlflow: MLflowConfig
     source_path: Path
+    source_bytes: bytes
     source_sha256: str
 
 
@@ -152,7 +147,6 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         required={
             "config_version",
             "name",
-            "executable",
             "dataset",
             "model",
             "training",
@@ -167,23 +161,28 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     return ExperimentConfig(
         config_version=config_version,
         name=_text(root["name"], "name"),
-        executable=_boolean(root["executable"], "executable"),
         dataset=_dataset_config(root["dataset"]),
         model=_model_config(root["model"]),
         training=_training_config(root["training"]),
         evaluation=_evaluation_config(root["evaluation"]),
         mlflow=_mlflow_config(root["mlflow"]),
         source_path=source,
+        source_bytes=source_bytes,
         source_sha256=hashlib.sha256(source_bytes).hexdigest(),
     )
 
 
 def _dataset_config(value: object) -> DatasetConfig:
     data = _mapping(value, "dataset")
-    _keys(data, required={"registry_key", "manifest_directory", "task_id"}, context="dataset")
+    _keys(
+        data,
+        required={"registry_key", "manifest_directory", "bundle_id", "task_id"},
+        context="dataset",
+    )
     return DatasetConfig(
         registry_key=_path_component(data["registry_key"], "dataset.registry_key"),
         manifest_directory=Path(_text(data["manifest_directory"], "dataset.manifest_directory")),
+        bundle_id=_path_component(data["bundle_id"], "dataset.bundle_id"),
         task_id=_text(data["task_id"], "dataset.task_id"),
     )
 
@@ -194,9 +193,6 @@ def _model_config(value: object) -> ModelConfig:
         data,
         required={
             "registry_key",
-            "output_name",
-            "modality",
-            "class_weighting",
             "parameters",
             "fit_parameters",
         },
@@ -210,10 +206,7 @@ def _model_config(value: object) -> ModelConfig:
             f"{randomness_conflicts}"
         )
     return ModelConfig(
-        registry_key=_text(data["registry_key"], "model.registry_key"),
-        output_name=_path_component(data["output_name"], "model.output_name"),
-        modality=_text(data["modality"], "model.modality"),
-        class_weighting=_text(data["class_weighting"], "model.class_weighting"),
+        registry_key=_path_component(data["registry_key"], "model.registry_key"),
         parameters=MappingProxyType(parameters),
         fit_parameters=MappingProxyType(_mapping(data["fit_parameters"], "model.fit_parameters")),
     )
@@ -223,7 +216,7 @@ def _training_config(value: object) -> TrainingConfig:
     data = _mapping(value, "training")
     _keys(
         data,
-        required={"seed", "report_directory", "model_directory", "require_clean_git"},
+        required={"seed", "report_directory", "model_directory"},
         context="training",
     )
     seed = _integer(data["seed"], "training.seed")
@@ -233,7 +226,6 @@ def _training_config(value: object) -> TrainingConfig:
         seed=seed,
         report_directory=Path(_text(data["report_directory"], "training.report_directory")),
         model_directory=Path(_text(data["model_directory"], "training.model_directory")),
-        require_clean_git=_boolean(data["require_clean_git"], "training.require_clean_git"),
     )
 
 
@@ -242,7 +234,6 @@ def _evaluation_config(value: object) -> EvaluationConfig:
     _keys(
         data,
         required={
-            "threshold_policy",
             "sensitivity_target",
             "calibration_bins",
             "latency_warmup_calls",
@@ -258,18 +249,14 @@ def _evaluation_config(value: object) -> EvaluationConfig:
         raise ConfigError("evaluation.sensitivity_target must be in (0, 1]")
     if bins <= 0 or warmup < 0 or measured <= 0:
         raise ConfigError("Evaluation bin and latency call counts are invalid")
-    threshold_policy = _text(data["threshold_policy"], "evaluation.threshold_policy")
-    if threshold_policy != "youden_j":
-        raise ConfigError(f"Unsupported threshold policy: {threshold_policy}")
-    return EvaluationConfig(threshold_policy, sensitivity, bins, warmup, measured)
+    return EvaluationConfig(sensitivity, bins, warmup, measured)
 
 
 def _mlflow_config(value: object) -> MLflowConfig:
     data = _mapping(value, "mlflow")
-    _keys(data, required={"experiment_name", "tracking_directory"}, context="mlflow")
+    _keys(data, required={"experiment_name"}, context="mlflow")
     return MLflowConfig(
         experiment_name=_text(data["experiment_name"], "mlflow.experiment_name"),
-        tracking_directory=Path(_text(data["tracking_directory"], "mlflow.tracking_directory")),
     )
 
 
@@ -317,9 +304,3 @@ def _number(value: object, context: str) -> float:
     if not isinstance(value, int | float) or isinstance(value, bool):
         raise ConfigError(f"{context} must be numeric")
     return float(value)
-
-
-def _boolean(value: object, context: str) -> bool:
-    if not isinstance(value, bool):
-        raise ConfigError(f"{context} must be boolean")
-    return value

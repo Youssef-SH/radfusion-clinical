@@ -8,14 +8,23 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from mlflow.exceptions import MlflowException
+from sqlalchemy.exc import SQLAlchemyError
+
 from radfusion.training.config import ConfigError, load_experiment_config
-from radfusion.training.registry import RegistryError, register_builtin_components
+from radfusion.training.registry import RegistryError
 from radfusion.training.train_tabular import train_configured_experiment
+from radfusion.utils.mlflow_utils import DEFAULT_TRACKING_URI
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True, help="Experiment YAML file")
+    parser.add_argument(
+        "--tracking-uri",
+        default=DEFAULT_TRACKING_URI,
+        help="MLflow SQLite tracking URI",
+    )
     return parser
 
 
@@ -24,9 +33,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         config = load_experiment_config(args.config)
-        register_builtin_components()
-        result = train_configured_experiment(config)
-    except (ConfigError, RegistryError, OSError, ValueError, KeyError) as exc:
+        result = train_configured_experiment(config, tracking_uri=args.tracking_uri)
+    except (
+        ConfigError,
+        RegistryError,
+        MlflowException,
+        SQLAlchemyError,
+        OSError,
+        ValueError,
+        KeyError,
+    ) as exc:
         print(f"Experiment failed: {exc}", file=sys.stderr)
         return 1
     print(
@@ -36,7 +52,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "config": config.source_path.as_posix(),
                 "model_name": result.model_name,
                 "mlflow_run_id": result.run_id,
-                "test_average_precision": result.test_youden_j.probability.average_precision,
+                "validation_average_precision": result.validation_probability.average_precision,
                 "model_path": result.model_path.as_posix(),
                 "artifact_directory": result.artifact_directory.as_posix(),
             },

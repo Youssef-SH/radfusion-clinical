@@ -17,17 +17,24 @@ The lifecycle is: source dataset → build execution → immutable bundle → va
 | --- | --- |
 | Source adapter | Parse source tables, discover DICOM files, and extract selected headers |
 | Artifact builder | Normalize typed records and construct patient-level assignments |
-| Validator | Enforce schemas, relationships, identities, paths, and ordering |
+| Validator | Enforce schemas, relationships, paths, identities, and ordering |
 | Bundle publisher | Publish immutable bundles and update `CURRENT` atomically |
 | Audit generator | Produce aggregate dataset reports from a validated bundle |
-| Dataset registry | Resolve a configured bundle adapter |
-| Model registry | Resolve a configured model adapter |
-| Experiment runner | Coordinate fitting, evaluation, publication, and tracking |
+| Dataset mapping | Resolve the built-in adapter for a pinned bundle |
+| Model mapping | Resolve the built-in metadata estimator adapter |
+| Tabular runner | Fit on train and select operating thresholds on validation |
+| Test evaluator | Apply a completed training run to the test partition |
 | Evaluation utilities | Compute probabilities, metrics, thresholds, latency, and plots |
 
 Dataset adapters isolate source-specific behavior. Training consumes validated bundles and never
-parses raw dataset files. Model adapters own estimator construction and fitting. One runner serves
-all registered experiment types.
+parses raw dataset files. Model adapters own estimator construction and fitting.
+
+The manifest owns dataset, task, split, source, and artifact lineage. Parquet tables contain
+row-level facts, while audits contain derived descriptions. `CURRENT` selects a bundle for
+interactive commands; experiment configs pin an exact bundle ID.
+
+MLflow stores experiment metadata in local SQLite. Reports, models, plots, resolved
+configurations, and MLflow artifacts remain filesystem files.
 
 ## Data flow
 
@@ -36,8 +43,8 @@ RSNA source files
     → dataset adapter
     → validated tables and manifest
     → immutable bundle
-    → audit or experiment runner
-    → aggregate reports, immutable models, and MLflow runs
+    → audit, tabular training, or explicit test evaluation
+    → bundle-qualified audits or run-qualified experiment outputs
 ```
 
 Artifact schemas are defined in [`data_contract.md`](data_contract.md). Experiment composition is

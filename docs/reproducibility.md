@@ -31,8 +31,8 @@ uv run python -m radfusion.data.rsna_manifest \
   --test-ratio 0.15
 ```
 
-The build authenticates both source CSV files and every labeled DICOM by SHA-256. It validates
-each generated artifact before publishing the immutable bundle and updating `CURRENT`.
+The build authenticates both source CSV files and every labeled DICOM by SHA-256. It validates the
+complete staged bundle before publishing it and updating `CURRENT`.
 
 The default split recipe groups samples by patient and stratifies on the binary challenge target.
 Within each target stratum, patients are ordered by SHA-256 of the UTF-8 bytes
@@ -41,8 +41,20 @@ patient per positive-ratio destination when feasible, then applies largest remai
 train, validation, test order. For smaller strata, patients fill the highest-ratio destinations,
 with canonical order breaking equal-ratio ties.
 
-The split recipe ID hashes the complete policy. The cohort fingerprint hashes canonical patient
-membership and targets. The split assignment ID hashes the recipe, cohort, and assignments.
+The split recipe ID hashes only the algorithm version, seed, stratification target, and ordered
+ratios. The algorithm version binds patient grouping, SHA-256 ranking, UTF-8 input encoding,
+patient-ID collision tie-breaking, allocation, and canonical split order.
+
+The split assignment ID hashes the canonical sorted `(sample_id, split_name)` mapping. It is stable
+for the same assignment and changes when any assignment changes.
+
+Logical Arrow hashes cover each artifact's exact schema and canonical ordered values. Canonical
+null handling keeps these hashes stable across valid Parquet round trips. Logical hashes
+participate in the semantic bundle ID.
+
+Physical Parquet hashes cover serialized file bytes and detect corruption. They can differ across
+valid encodings of the same logical tables and do not participate in bundle identity. The exact
+identity and acceptance rules are defined in [`data_contract.md`](data_contract.md).
 
 ## Generate audits and experiments
 
@@ -50,17 +62,25 @@ membership and targets. The split assignment ID hashes the recipe, cohort, and a
 make rsna-audit
 make train CONFIG=configs/metadata_logistic.yaml
 make train CONFIG=configs/metadata_lightgbm.yaml
+make evaluate RUN_ID=<training-run-id>
+make compare
 ```
 
-Preprocessing is fitted on training data. Validation selects the LightGBM stopping point and both
-operating thresholds. The fixed pipeline is then evaluated on the patient-disjoint internal test
-split.
+Replace `<training-run-id>` with the actual run ID printed by training.
 
-Release configs require a clean Git tree. Every run records Git commit and dirty status. A
-development run from a dirty tree archives the binary tracked diff and relevant nonignored
-untracked source, config, test, and documentation files. A SHA-256 identity of that source state is
-recorded with the run. Raw data, credentials, environments, and generated outputs are excluded
-from the snapshot.
+Audits are published under `reports/rsna/audit/<bundle-id>/`. Rebuilding one audit replaces only
+that bundle-qualified audit directory.
+
+Executable configs pin the exact bundle ID and one training seed. Preprocessing is fitted on
+training data. Validation selects the LightGBM stopping point and both operating thresholds.
+`make evaluate` verifies those choices against the source training run before applying them to
+test in a separate linked run.
+
+Training runs record the Git commit and dirty status, exact configuration bytes and hash,
+dependency-lock hash, environment, dataset identity, and model lineage. A dirty run records that
+uncommitted changes existed but does not archive their bytes, so its Git lineage alone cannot
+reconstruct that source state. Test-evaluation runs record the model and dataset lineage they use
+and link to the verified source training run.
 
 ## Probability and operating-point metrics
 
@@ -71,12 +91,13 @@ Average precision is computed with `average_precision_score`. Probability metric
 ROC-AUC and Brier score. Threshold-dependent precision, recall, specificity, F1, and confusion
 counts are grouped by operating point:
 
-- the Youden-J comparative threshold maximizes validation sensitivity minus false-positive rate;
+- the Youden-J threshold maximizes validation sensitivity minus false-positive rate;
 - the target-sensitivity threshold is the highest validation threshold meeting the configured
   sensitivity, which is 0.90 in the executable configs.
 
-The thresholds are applied unchanged to test probabilities. The Youden-J point is a comparative
-benchmark operating point, not a clinical optimum.
+Both policies enumerate every finite ROC threshold and choose the highest threshold among ties or
+qualifying candidates. The thresholds are applied unchanged to test probabilities. They are
+benchmark operating points, not clinical optima.
 
 ## Calibration
 
@@ -108,9 +129,15 @@ MiB.
 Bundle identity and acceptance rules are defined in [`data_contract.md`](data_contract.md).
 Immutable model lineage and comparison-table roles are defined in [`training.md`](training.md).
 
-MLflow stores the complete run history. Each run records config hash, bundle and split identities,
-label policy, Git state, lock hash, resolved model parameters, deterministic LightGBM settings,
-environment, metrics, reports, and the skops model.
+MLflow stores the experiment history. Every training attempt logs the exact loaded YAML before
+dataset access and records resolved split and label-policy lineage before fitting. Successful
+training runs also record resolved parameters, validation metrics, thresholds, reports, and the
+exact serialized model bytes. Linked test runs record test metrics and reports without publishing
+another fitted model.
+
+Run metadata is stored in `mlflow.db`. MLflow artifacts are ordinary files under `mlartifacts/`;
+model packages and reports remain under `models/` and `reports/`. These locations are generated
+state and are removed by `make clean`.
 
 ## Quality gates
 

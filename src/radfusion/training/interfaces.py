@@ -1,4 +1,4 @@
-"""Define typed boundaries for registered training components."""
+"""Define typed boundaries for tabular experiment components."""
 
 from __future__ import annotations
 
@@ -15,15 +15,33 @@ from radfusion.training.config import DatasetConfig, ModelConfig
 
 
 @dataclass(frozen=True)
-class DatasetRunData:
-    """Validated model-ready dataset frame and lineage."""
+class DatasetLineage:
+    """Pinned dataset and task lineage shared by all partitions."""
 
-    frame: pd.DataFrame
     bundle_id: str
-    split_recipe_id: str
-    cohort_fingerprint: str
     split_assignment_id: str
     label_policy_version: str
+    task_id: str
+
+
+@dataclass(frozen=True)
+class DatasetPartition:
+    """Approved model inputs separated from identifiers and partition lineage."""
+
+    features: pd.DataFrame
+    targets: np.ndarray
+    sample_ids: tuple[str, ...]
+    patient_ids: tuple[str, ...]
+    partition: str
+
+
+@dataclass(frozen=True)
+class DatasetRunData:
+    """The only partitions available to the training runner."""
+
+    train: DatasetPartition
+    validation: DatasetPartition
+    lineage: DatasetLineage
 
 
 @dataclass(frozen=True)
@@ -42,10 +60,16 @@ class ModelFitResult:
 
 
 class DatasetImplementation(Protocol):
-    """Registered dataset adapter used by the experiment runner."""
+    """Dataset adapter used by the tabular runner and evaluator."""
 
-    def load(self, config: DatasetConfig) -> DatasetRunData:
-        """Load and validate one configured dataset bundle."""
+    def load_train_validation(self, config: DatasetConfig) -> DatasetRunData:
+        """Load only train and validation partitions from a pinned bundle."""
+
+    def load_lineage(self, config: DatasetConfig) -> DatasetLineage:
+        """Validate a pinned bundle and return task lineage."""
+
+    def load_test(self, config: DatasetConfig) -> tuple[DatasetPartition, DatasetLineage]:
+        """Load only the test partition and its pinned lineage."""
 
 
 class ModelImplementation(Protocol):

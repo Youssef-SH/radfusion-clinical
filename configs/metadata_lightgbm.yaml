@@ -1,17 +1,14 @@
 config_version: 1
 name: metadata_lightgbm
-executable: true
 
 dataset:
   registry_key: rsna
   manifest_directory: data/manifests
+  bundle_id: build-cfe6e3818fbc179af2cd6237641cdde716159a18c2d1430644bba71058adead0
   task_id: pneumonia
 
 model:
   registry_key: metadata_lightgbm
-  output_name: metadata_lightgbm
-  modality: metadata
-  class_weighting: train_class_ratio
   parameters:
     objective: binary
     n_estimators: 500
@@ -31,10 +28,8 @@ training:
   seed: 42
   report_directory: reports
   model_directory: models/rsna
-  require_clean_git: true
 
 evaluation:
-  threshold_policy: youden_j
   sensitivity_target: 0.90
   calibration_bins: 15
   latency_warmup_calls: 100
@@ -42,4 +37,3 @@ evaluation:
 
 mlflow:
   experiment_name: radfusion-rsna
-  tracking_directory: mlruns

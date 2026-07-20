@@ -1,87 +1,128 @@
-# Configuration-driven training
+# Metadata experiments
 
-Run one experiment from one YAML file:
+Each executable experiment is defined by one strict YAML file:
+
+```yaml
+config_version: 1
+name: metadata_logistic_regression
+
+dataset:
+  registry_key: rsna
+  manifest_directory: data/manifests
+  bundle_id: build-<sha256>
+  task_id: pneumonia
+
+model:
+  registry_key: metadata_logistic
+  parameters: {}
+  fit_parameters: {}
+
+training:
+  seed: 42
+  report_directory: reports
+  model_directory: models/rsna
+
+evaluation:
+  sensitivity_target: 0.90
+  calibration_bins: 15
+  latency_warmup_calls: 100
+  latency_measured_calls: 1000
+
+mlflow:
+  experiment_name: radfusion-rsna
+```
+
+The loader rejects missing, unknown, and duplicate keys. The bundle ID is mandatory; experiments
+never resolve `CURRENT`. `training.seed` is the single randomness authority.
+
+The executable configs are `configs/metadata_logistic.yaml` and
+`configs/metadata_lightgbm.yaml`.
+
+## Feature boundary
+
+The RSNA adapter exposes these model features:
+
+- `age_years`
+- `age_is_implausible`
+- `sex`
+- `view_position`
+- `pixel_spacing_row_mm`
+- `pixel_spacing_col_mm`
+
+Preprocessing rejects additional columns. Sample IDs, patient IDs, image paths, targets,
+partitions, and lineage remain separate from the feature frame. Imputation, categories,
+missingness indicators, scaling, and class weighting are derived from training data.
+
+## Execution
 
 ```bash
 make train CONFIG=configs/metadata_logistic.yaml
-make train CONFIG=configs/metadata_lightgbm.yaml
+make evaluate RUN_ID=<training-run-id>
+make compare
 ```
 
-The loader rejects unknown or duplicate keys, missing fields, invalid types, unsupported policies,
-unknown registry keys, and estimator parameters that conflict with repository-level controls.
-Executable release configs require a clean Git tree.
+Replace `<training-run-id>` with the actual ID printed by `make train`. The angle brackets mark a
+placeholder and are not part of the command.
 
-## Configuration
+Training validates the complete pinned bundle, then performs projected and filtered reads for
+train and validation only. It fits preprocessing and the estimator on train, uses validation for
+LightGBM early stopping, selects both operating thresholds on validation, and publishes the fitted
+model.
 
-Each YAML defines:
+Test evaluation is a separate run. Before reading test data, it cross-checks the package,
+configuration, model bytes, pinned bundle, source-run tags, validation-derived thresholds, and
+LightGBM best iteration. It then reads only test and applies the verified choices unchanged.
 
-- a registered dataset adapter and task;
-- a registered model adapter and fixed estimator parameters;
-- one training seed and output locations;
-- threshold, calibration, and latency settings;
-- an MLflow experiment and tracking location.
+The built-in dataset and model adapters are held in immutable mappings. One tabular runner owns
+training; the explicit evaluator owns test evaluation.
 
-`training.seed` controls estimator randomness. The model adapter derives all estimator seed fields
-from it. The class-weighting policy also has one source: Logistic Regression receives balanced
-weights, while LightGBM derives `scale_pos_weight` from training labels.
+## Tracking and outputs
 
-The executable baseline configs are:
+MLflow stores run metadata in `mlflow.db` and run artifacts under `mlartifacts/`. Inspect local
+runs with:
 
-- `configs/metadata_logistic.yaml`
-- `configs/metadata_lightgbm.yaml`
+```bash
+uv run mlflow server --backend-store-uri sqlite:///mlflow.db
+```
 
-The image and fusion YAML files are non-executable configuration examples.
+A training run logs the exact loaded YAML before dataset access and records resolved split and
+label-policy lineage before fitting. Training and test-evaluation runs become complete only after
+required MLflow artifacts and local run-qualified outputs are published. The test run links to its
+source training run and does not publish another model.
 
-## Execution flow
-
-The CLI loads the config, registers built-in datasets and models once, and invokes one runner. The
-runner:
-
-1. loads the validated bundle through the dataset adapter;
-2. fits preprocessing and the estimator from training data;
-3. uses validation data for LightGBM stopping and operating-point selection;
-4. evaluates the fixed pipeline on the test split;
-5. publishes aggregate reports and an immutable model run;
-6. records the execution in MLflow;
-7. updates the current comparison table under an interprocess lock.
-
-LightGBM monitors validation average precision as its sole early-stopping metric. Its configured
-500 estimators are an upper bound, and prediction uses the fitted best iteration.
-
-## Registries and extension points
-
-`DatasetRegistry` resolves bundle loading and frame construction. `ModelRegistry` resolves
-estimator construction and fitting. Registration occurs through `register_builtin_components()`;
-module import side effects do not register components.
-
-A compatible tabular model requires:
-
-1. a model adapter implementing the fitting interface;
-2. one registration in the built-in model registry;
-3. an experiment YAML that names the registry key.
-
-The shared runner owns evaluation, publication, and tracking. Dataset adapters return validated,
-deterministically ordered train, validation, and test data with bundle, split, and label lineage.
-
-## Outputs
-
-Reports are published under `reports/<dataset>/models/<output-name>/`. `metrics.json` is the
-structured metric source; Markdown and CSV views are generated from the same in-memory values.
-
-Models are published under:
+Local training packages contain:
 
 ```text
-models/<dataset>/<output-name>/
-  CURRENT
-  runs/<mlflow-run-id>/
-    model.skops
-    lineage.json
+models/rsna/runs/<training-run-id>/
+  model.skops
+  resolved_config.yaml
+  model_manifest.json
 ```
 
-Run directories are immutable. `lineage.json` binds the model to its config, bundle, split
-identities, label policy, seed, Git state, dependency lock, derived parameters, and physical model
-identity.
+The manifest records the model hash, training run, pinned bundle and split assignment, task,
+positive class, config hash, seed, Git commit, dependency lock, best iteration, and thresholds.
+There is no model selection pointer.
 
-MLflow retains full execution history. `reports/model_comparison_table.csv` contains the current
-row for each semantic experiment identity. See [`reproducibility.md`](reproducibility.md) for the
-evaluation and provenance protocols.
+Each training or test-evaluation run publishes aggregate reports under
+`reports/rsna/runs/<run-id>/`:
+
+```text
+metrics.json
+evaluation_report.md
+confusion_summary.md
+roc_curve.png
+precision_recall_curve.png
+calibration_curve.png
+confusion_matrix_youden_j.png
+confusion_matrix_target_sensitivity.png
+```
+
+Publication requires exactly this set after privacy validation. `make compare` deterministically
+regenerates `reports/model_comparison_table.csv` and `.md` from complete, finite MLflow records.
+Failed, unfinished, and incomplete runs are excluded.
+
+The tracking URI is operational infrastructure. All commands default to `sqlite:///mlflow.db` and
+accept `--tracking-uri` when an isolated local SQLite database is required.
+
+Metric definitions and experimental protocols are documented in
+[`reproducibility.md`](reproducibility.md).

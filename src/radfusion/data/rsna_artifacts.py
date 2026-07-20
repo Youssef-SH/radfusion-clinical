@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import platform
 import shutil
@@ -62,13 +63,14 @@ from radfusion.data.splitting import (
     PATIENT_HASH_INPUT_TEMPLATE,
     PATIENT_RANKING_RULE,
     PATIENT_TARGET_CONSISTENCY_RULE,
-    SPLIT_ALGORITHM,
-    SPLIT_ALGORITHM_POLICY_VERSION,
+    SPLIT_ALGORITHM_VERSION,
     SPLIT_ALLOCATION_RULE,
+    SPLIT_NAMES,
+    SPLIT_SOURCE,
     STRATIFICATION_TARGET,
     SplitConfig,
     create_patient_stratified_splits,
-    split_summary,
+    split_assignment_id,
     validate_split_table,
 )
 
@@ -82,48 +84,37 @@ METADATA_FILENAME = "rsna_manifest_metadata.json"
 CURRENT_FILENAME = "CURRENT"
 BUNDLES_DIRECTORY = "builds"
 BUNDLE_IDENTITY_POLICY_VERSION = "rsna-bundle-identity-v2"
-SEMANTIC_IDENTITY_FIELDS = (
-    "manifest_schema_version",
-    "dataset_id",
-    "dataset_version",
-    "label_policy_versions",
-    "sample_count",
-    "label_count",
-    "positive_count",
-    "negative_count",
-    "annotation_count",
-    "source_inventory_count",
-    "split",
-    "image_dimensions_summary",
-    "photometric_interpretation_summary",
-    "transfer_syntax_summary",
-    "pixel_spacing_summary",
-    "age_parsing_summary",
-    "implausible_age_count",
-    "sex_distribution",
-    "view_distribution",
-    "rsna_class_distribution",
-    "dicom_audit",
-    "source_file_hashes",
-)
-SEMANTIC_HASH_POLICY_FIELDS = (
-    "source_files",
-    "arrow_ipc_sha256",
-    "artifact_files",
-    "dicom_files",
+_SPLIT_METADATA_FIELDS = frozenset(
+    {
+        "split_source",
+        "split_recipe_id",
+        "split_assignment_id",
+        "algorithm_version",
+        "patient_grouping_rule",
+        "patient_target_consistency_rule",
+        "ranking_rule",
+        "patient_hash_algorithm",
+        "patient_hash_input_encoding",
+        "patient_hash_input_template",
+        "seed",
+        "stratification_target",
+        "allocation_rule",
+        "split_order",
+        "ratios",
+    }
 )
 
 
 @dataclass(frozen=True)
 class SampleRecord:
-    dataset_id: str
     sample_id: str
     patient_id: str
-    study_id: str | None
     image_id: str
     image_path: str
-    split: str | None
+    image_rows: int
+    image_columns: int
     age_years: float | None
+    age_is_implausible: bool
     sex: str | None
     view_position: str | None
     pixel_spacing_row_mm: float | None
@@ -132,18 +123,13 @@ class SampleRecord:
 
 @dataclass(frozen=True)
 class LabelRecord:
-    dataset_id: str
     sample_id: str
     task_id: str
     label_value: int
-    label_status: str
-    label_source: str
-    label_policy_version: str
 
 
 @dataclass(frozen=True)
 class AnnotationRecord:
-    dataset_id: str
     sample_id: str
     annotation_id: str
     x: float
@@ -154,7 +140,6 @@ class AnnotationRecord:
 
 @dataclass(frozen=True)
 class SourceInventoryRecord:
-    dataset_id: str
     sample_id: str
     relative_path: str
     byte_size: int
@@ -169,7 +154,6 @@ class BuildResult:
     splits: pa.Table
     source_inventory: pa.Table
     metadata: Mapping[str, Any]
-    image_dimensions: Mapping[str, tuple[int, int]]
 
 
 @dataclass(frozen=True)
@@ -227,23 +211,25 @@ def build_rsna_artifacts(
         sample_id = f"{DATASET_ID}:{source_id}"
         source_inventory_records.append(
             SourceInventoryRecord(
-                dataset_id=DATASET_ID,
                 sample_id=sample_id,
                 relative_path=relative_image_path.as_posix(),
                 byte_size=image_path.stat().st_size,
                 sha256=sha256_file(image_path),
             )
         )
+        if dicom.rows is None or dicom.columns is None:
+            raise ManifestBuildError(f"Missing image dimensions for DICOM {source_id!r}")
+        dimensions[sample_id] = (dicom.rows, dicom.columns)
         sample_records.append(
             SampleRecord(
-                dataset_id=DATASET_ID,
                 sample_id=sample_id,
                 patient_id=source_id,
-                study_id=None,
                 image_id=source_id,
                 image_path=relative_image_path.as_posix(),
-                split=None,
+                image_rows=dicom.rows,
+                image_columns=dicom.columns,
                 age_years=dicom.age.value_years,
+                age_is_implausible=dicom.age.implausible,
                 sex=dicom.sex,
                 view_position=dicom.view_position,
                 pixel_spacing_row_mm=dicom.pixel_spacing_row_mm,
@@ -251,10 +237,6 @@ def build_rsna_artifacts(
             )
         )
         label_records.extend(_label_records(sample_id, source.target, source.rsna_class))
-
-        if dicom.rows is None or dicom.columns is None:
-            raise ManifestBuildError(f"Missing image dimensions for DICOM {source_id!r}")
-        dimensions[sample_id] = (dicom.rows, dicom.columns)
         annotation_records.extend(
             _annotation_records(
                 sample_id,
@@ -281,7 +263,7 @@ def build_rsna_artifacts(
     )
     validate_sample_table(samples, paths.root)
     validate_label_table(labels, samples)
-    validate_annotation_table(annotations, samples, labels, dimensions)
+    validate_annotation_table(annotations, samples, labels)
     _validate_source_inventory(source_inventory, samples, paths.root)
     if len(audit.sop_instance_uids) != samples.num_rows:
         raise ManifestBuildError("Every RSNA sample must have one unique SOP Instance UID")
@@ -297,7 +279,7 @@ def build_rsna_artifacts(
         audit,
         resolved_split_config,
     )
-    return BuildResult(samples, labels, annotations, splits, source_inventory, metadata, dimensions)
+    return BuildResult(samples, labels, annotations, splits, source_inventory, metadata)
 
 
 def write_bundle(result: BuildResult, output_directory: str | Path) -> WriteResult:
@@ -328,38 +310,7 @@ def write_bundle(result: BuildResult, output_directory: str | Path) -> WriteResu
             staged_paths.source_inventory_path,
             compression="zstd",
         )
-        _validate_parquet_round_trip(
-            staged_paths.samples_path, result.samples, RSNA_SAMPLE_SCHEMA, "samples"
-        )
-        _validate_parquet_round_trip(
-            staged_paths.splits_path, result.splits, RSNA_SPLIT_SCHEMA, "splits"
-        )
-        _validate_parquet_round_trip(
-            staged_paths.source_inventory_path,
-            result.source_inventory,
-            RSNA_SOURCE_INVENTORY_SCHEMA,
-            "source inventory",
-        )
-        _validate_parquet_round_trip(
-            staged_paths.labels_path, result.labels, RSNA_LABEL_SCHEMA, "labels"
-        )
-        _validate_parquet_round_trip(
-            staged_paths.annotations_path,
-            result.annotations,
-            RSNA_ANNOTATION_SCHEMA,
-            "annotations",
-        )
-        file_hashes = {
-            filename: sha256_file(path)
-            for filename, path in {
-                SAMPLES_FILENAME: staged_paths.samples_path,
-                LABELS_FILENAME: staged_paths.labels_path,
-                ANNOTATIONS_FILENAME: staged_paths.annotations_path,
-                SPLITS_FILENAME: staged_paths.splits_path,
-                SOURCE_INVENTORY_FILENAME: staged_paths.source_inventory_path,
-            }.items()
-        }
-        bundle_id = _bundle_id(arrow_hashes, file_hashes, result.metadata)
+        bundle_id = _bundle_id(arrow_hashes, result.metadata)
         final_directory = builds_root / bundle_id
         staged_paths = _bundle_paths(bundle_id, stage_directory, current_path)
         metadata = _finalize_metadata(result.metadata, bundle_id, staged_paths, arrow_hashes)
@@ -378,11 +329,7 @@ def write_bundle(result: BuildResult, output_directory: str | Path) -> WriteResu
         else:
             os.replace(stage_directory, final_directory)
         final_paths = _bundle_paths(bundle_id, final_directory, current_path)
-        validate_bundle_directory(final_directory, expected_bundle_id=bundle_id)
         _update_current_marker(current_path, bundle_id)
-        loaded = load_current_bundle(output_root)
-        if loaded.bundle_id != bundle_id:
-            raise ManifestBuildError("CURRENT did not resolve to the newly published bundle")
     finally:
         if stage_directory.exists():
             shutil.rmtree(stage_directory)
@@ -442,18 +389,17 @@ def validate_bundle_directory(
     schema_version = metadata.get("manifest_schema_version")
     if schema_version != MANIFEST_SCHEMA_VERSION:
         raise ManifestBuildError(f"Unsupported manifest_schema_version: {schema_version!r}")
+    split_config = _validate_manifest_contract(metadata)
     hashes = metadata.get("generated_artifact_hashes", {})
     if not isinstance(hashes, dict) or set(hashes) != set(expected_files):
         raise ManifestBuildError("Bundle metadata declares an unexpected artifact set")
     actual_arrow_hashes: dict[str, str] = {}
-    actual_file_hashes: dict[str, str] = {}
     for filename, schema in expected_files.items():
         path = directory / filename
         declared = hashes.get(filename)
         if not isinstance(declared, dict):
             raise ManifestBuildError(f"Bundle is incomplete: {filename}")
         actual_file_hash = sha256_file(path)
-        actual_file_hashes[filename] = actual_file_hash
         if actual_file_hash != declared.get("file_sha256"):
             raise ManifestBuildError(f"File hash mismatch for {filename}")
         table = pq.read_table(path)
@@ -466,7 +412,7 @@ def validate_bundle_directory(
         if actual_arrow_hash != declared.get("arrow_ipc_sha256"):
             raise ManifestBuildError(f"Arrow IPC hash mismatch for {filename}")
     try:
-        computed_bundle_id = _bundle_id(actual_arrow_hashes, actual_file_hashes, metadata)
+        computed_bundle_id = _bundle_id(actual_arrow_hashes, metadata)
     except (KeyError, TypeError) as exc:
         raise ManifestBuildError("Bundle metadata is missing identity fields") from exc
     if computed_bundle_id != bundle_id:
@@ -484,14 +430,14 @@ def validate_bundle_directory(
     split_metadata = metadata.get("split")
     if not isinstance(split_metadata, dict):
         raise ManifestBuildError("Bundle metadata is missing split lineage")
-    config = _split_config_from_metadata(split_metadata)
-    validate_split_table(splits, samples, labels, config=config)
-    split_row = splits.slice(0, 1).to_pylist()[0]
-    for field in ("split_recipe_id", "cohort_fingerprint", "split_assignment_id"):
-        if split_metadata.get(field) != split_row[field]:
-            raise ManifestBuildError(f"Split metadata {field} does not match the split artifact")
+    validate_split_table(splits, samples, labels, config=split_config)
+    assignments = {row["sample_id"]: row["split_name"] for row in splits.to_pylist()}
+    if split_metadata.get("split_recipe_id") != split_config.recipe_id:
+        raise ManifestBuildError("Split metadata recipe does not match its policy")
+    if split_metadata.get("split_assignment_id") != split_assignment_id(assignments):
+        raise ManifestBuildError("Split assignment identity does not match the split artifact")
     _validate_source_inventory(source_inventory, samples)
-    _validate_metadata_counts(metadata, samples, labels, annotations, splits, source_inventory)
+    _validate_metadata_counts(metadata, samples, labels, annotations, source_inventory)
     return metadata
 
 
@@ -510,27 +456,74 @@ def _require_exact_regular_entries(directory: Path, required_names: set[str]) ->
             )
 
 
+def _validate_manifest_contract(metadata: Mapping[str, Any]) -> SplitConfig:
+    tasks = metadata.get("tasks")
+    if tasks != _task_definitions():
+        raise ManifestBuildError("Bundle metadata declares an unsupported task contract")
+    if metadata.get("privacy") != {
+        "classification": "protected patient-level data",
+        "public_reporting": "aggregate only",
+    }:
+        raise ManifestBuildError("Bundle metadata declares an unsupported privacy classification")
+    split = metadata.get("split")
+    if not isinstance(split, dict):
+        raise ManifestBuildError("Bundle metadata is missing split lineage")
+    if set(split) != _SPLIT_METADATA_FIELDS:
+        raise ManifestBuildError("Bundle metadata contains invalid split metadata fields")
+    expected_split_policy = {
+        "split_source": SPLIT_SOURCE,
+        "algorithm_version": SPLIT_ALGORITHM_VERSION,
+        "patient_grouping_rule": PATIENT_GROUPING_RULE,
+        "patient_target_consistency_rule": PATIENT_TARGET_CONSISTENCY_RULE,
+        "ranking_rule": PATIENT_RANKING_RULE,
+        "patient_hash_algorithm": PATIENT_HASH_ALGORITHM,
+        "patient_hash_input_encoding": PATIENT_HASH_INPUT_ENCODING,
+        "patient_hash_input_template": PATIENT_HASH_INPUT_TEMPLATE,
+        "allocation_rule": SPLIT_ALLOCATION_RULE,
+        "split_order": list(SPLIT_NAMES),
+        "stratification_target": STRATIFICATION_TARGET,
+    }
+    if any(split.get(key) != value for key, value in expected_split_policy.items()):
+        raise ManifestBuildError("Bundle metadata contains an unsupported split algorithm")
+    return _split_config_from_metadata(split)
+
+
 def _label_records(sample_id: str, target: int, rsna_class: str) -> list[LabelRecord]:
     return [
         LabelRecord(
-            DATASET_ID,
             sample_id,
             PNEUMONIA_TASK_ID,
             target,
-            "observed",
-            PNEUMONIA_LABEL_SOURCE,
-            PNEUMONIA_LABEL_POLICY_VERSION,
         ),
         LabelRecord(
-            DATASET_ID,
             sample_id,
             RSNA_CLASS_TASK_ID,
             RSNA_CLASS_VALUES[rsna_class],
-            "observed",
-            RSNA_CLASS_LABEL_SOURCE,
-            RSNA_CLASS_LABEL_POLICY_VERSION,
         ),
     ]
+
+
+def _task_definitions() -> dict[str, dict[str, Any]]:
+    return {
+        PNEUMONIA_TASK_ID: {
+            "label_source": PNEUMONIA_LABEL_SOURCE,
+            "label_policy_version": PNEUMONIA_LABEL_POLICY_VERSION,
+            "label_values": [0, 1],
+            "label_meanings": {"0": "negative", "1": "positive"},
+            "status_semantics": "observed challenge label",
+            "exclusion_rules": "none within the labeled Stage 2 cohort",
+        },
+        RSNA_CLASS_TASK_ID: {
+            "label_source": RSNA_CLASS_LABEL_SOURCE,
+            "label_policy_version": RSNA_CLASS_LABEL_POLICY_VERSION,
+            "label_values": sorted(RSNA_CLASS_VALUES.values()),
+            "label_meanings": {
+                str(value): name for name, value in sorted(RSNA_CLASS_VALUES.items())
+            },
+            "status_semantics": "observed detailed class label",
+            "exclusion_rules": "none within the labeled Stage 2 cohort",
+        },
+    }
 
 
 def _annotation_records(
@@ -549,7 +542,6 @@ def _annotation_records(
         validate_box_bounds(box, dimensions, sample_id)
         records.append(
             AnnotationRecord(
-                DATASET_ID,
                 sample_id,
                 f"{DATASET_ID}:{image_id}:bbox:{index:04d}",
                 box.x,
@@ -571,31 +563,16 @@ def _build_aggregate_metadata(
     audit: AuditAccumulator,
     split_config: SplitConfig,
 ) -> dict[str, Any]:
-    sample_rows = samples.to_pylist()
     label_rows = labels.to_pylist()
     pneumonia = Counter(
         str(row["label_value"]) for row in label_rows if row["task_id"] == PNEUMONIA_TASK_ID
     )
-    rsna_classes = Counter(
-        str(row["label_value"]) for row in label_rows if row["task_id"] == RSNA_CLASS_TASK_ID
-    )
-    class_names = {str(value): name for name, value in RSNA_CLASS_VALUES.items()}
-    sex = Counter(row["sex"] or "<missing>" for row in sample_rows)
-    views = Counter(row["view_position"] or "<missing>" for row in sample_rows)
-    spacing = Counter(
-        f"{row['pixel_spacing_row_mm']:.12g},{row['pixel_spacing_col_mm']:.12g}"
-        if row["pixel_spacing_row_mm"] is not None
-        else "<missing>"
-        for row in sample_rows
-    )
+    assignments = {row["sample_id"]: row["split_name"] for row in splits.to_pylist()}
     return {
         "manifest_schema_version": MANIFEST_SCHEMA_VERSION,
         "dataset_id": DATASET_ID,
         "dataset_version": DATASET_VERSION,
-        "label_policy_versions": {
-            PNEUMONIA_TASK_ID: PNEUMONIA_LABEL_POLICY_VERSION,
-            RSNA_CLASS_TASK_ID: RSNA_CLASS_LABEL_POLICY_VERSION,
-        },
+        "tasks": _task_definitions(),
         "sample_count": samples.num_rows,
         "label_count": labels.num_rows,
         "positive_count": pneumonia["1"],
@@ -603,11 +580,10 @@ def _build_aggregate_metadata(
         "annotation_count": annotations.num_rows,
         "source_inventory_count": source_inventory.num_rows,
         "split": {
-            "split_recipe_id": splits.column("split_recipe_id")[0].as_py(),
-            "cohort_fingerprint": splits.column("cohort_fingerprint")[0].as_py(),
-            "split_assignment_id": splits.column("split_assignment_id")[0].as_py(),
-            "algorithm": SPLIT_ALGORITHM,
-            "algorithm_policy_version": SPLIT_ALGORITHM_POLICY_VERSION,
+            "split_source": SPLIT_SOURCE,
+            "split_recipe_id": split_config.recipe_id,
+            "split_assignment_id": split_assignment_id(assignments),
+            "algorithm_version": SPLIT_ALGORITHM_VERSION,
             "patient_grouping_rule": PATIENT_GROUPING_RULE,
             "patient_target_consistency_rule": PATIENT_TARGET_CONSISTENCY_RULE,
             "ranking_rule": PATIENT_RANKING_RULE,
@@ -617,26 +593,8 @@ def _build_aggregate_metadata(
             "seed": split_config.seed,
             "stratification_target": STRATIFICATION_TARGET,
             "allocation_rule": SPLIT_ALLOCATION_RULE,
-            "ratios": {
-                "train": split_config.train_ratio,
-                "validation": split_config.validation_ratio,
-                "test": split_config.test_ratio,
-            },
-            "summary": split_summary(splits, samples, labels),
-        },
-        "image_dimensions_summary": {
-            "rows": _sorted_counter(audit.dicom_values.get("Rows", Counter())),
-            "columns": _sorted_counter(audit.dicom_values.get("Columns", Counter())),
-        },
-        "photometric_interpretation_summary": _sorted_counter(
-            audit.dicom_values.get("PhotometricInterpretation", Counter())
-        ),
-        "transfer_syntax_summary": _sorted_counter(
-            audit.dicom_values.get("TransferSyntaxUID", Counter())
-        ),
-        "pixel_spacing_summary": {
-            "unique_pair_count": len(spacing),
-            "value_counts": _sorted_counter(spacing),
+            "split_order": list(SPLIT_NAMES),
+            "ratios": split_config.recipe_payload["ratios"],
         },
         "age_parsing_summary": {
             "status_counts": _sorted_counter(audit.age_status),
@@ -644,11 +602,6 @@ def _build_aggregate_metadata(
             "warning_counts": _sorted_counter(audit.age_warnings),
         },
         "implausible_age_count": audit.implausible_age_count,
-        "sex_distribution": _sorted_counter(sex),
-        "view_distribution": _sorted_counter(views),
-        "rsna_class_distribution": {
-            class_names[key]: rsna_classes[key] for key in sorted(rsna_classes)
-        },
         "dicom_audit": {
             "field_value_counts": {
                 keyword: _sorted_counter(counter)
@@ -676,6 +629,10 @@ def _build_aggregate_metadata(
             "arrow_ipc_sha256": "SHA-256 over ordered Arrow IPC stream including exact schema",
             "artifact_files": "SHA-256 over generated Parquet bytes",
             "dicom_files": "SHA-256 and byte size for every source DICOM",
+        },
+        "privacy": {
+            "classification": "protected patient-level data",
+            "public_reporting": "aggregate only",
         },
         "provenance": {
             "tool_versions": {
@@ -730,10 +687,9 @@ def _finalize_metadata(
 
 def _bundle_id(
     arrow_hashes: Mapping[str, str],
-    file_hashes: Mapping[str, str],
     deterministic_metadata: Mapping[str, Any],
 ) -> str:
-    identity = _bundle_identity_payload(arrow_hashes, file_hashes, deterministic_metadata)
+    identity = _bundle_identity_payload(arrow_hashes, deterministic_metadata)
     digest = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -742,20 +698,25 @@ def _bundle_id(
 
 def _bundle_identity_payload(
     arrow_hashes: Mapping[str, str],
-    file_hashes: Mapping[str, str],
     metadata: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Build the explicit semantic identity payload for an RSNA bundle."""
-    hash_policy = metadata["hash_policy"]
-    semantic_metadata = {field: metadata[field] for field in SEMANTIC_IDENTITY_FIELDS}
-    semantic_metadata["hash_policy"] = {
-        field: hash_policy[field] for field in SEMANTIC_HASH_POLICY_FIELDS
-    }
+    split = metadata["split"]
     return {
         "identity_policy_version": BUNDLE_IDENTITY_POLICY_VERSION,
+        "manifest_schema_version": metadata["manifest_schema_version"],
+        "dataset_id": metadata["dataset_id"],
+        "dataset_version": metadata["dataset_version"],
+        "tasks": metadata["tasks"],
+        "split": {
+            "split_source": split["split_source"],
+            "algorithm_version": split["algorithm_version"],
+            "seed": split["seed"],
+            "stratification_target": split["stratification_target"],
+            "ratios": split["ratios"],
+        },
+        "source_file_hashes": metadata["source_file_hashes"],
         "arrow_ipc_sha256": dict(sorted(arrow_hashes.items())),
-        "file_sha256": dict(sorted(file_hashes.items())),
-        "semantic_metadata": semantic_metadata,
     }
 
 
@@ -788,18 +749,6 @@ def _update_current_marker(current_path: Path, bundle_id: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _validate_parquet_round_trip(
-    path: Path, expected: pa.Table, schema: pa.Schema, artifact_name: str
-) -> None:
-    restored = pq.read_table(path)
-    try:
-        require_exact_schema(restored, schema, artifact_name)
-    except ValueError as exc:
-        raise ManifestBuildError(str(exc)) from exc
-    if restored.num_rows != expected.num_rows or not restored.equals(expected):
-        raise ManifestBuildError(f"{artifact_name} changed during Parquet round-trip")
-
-
 def _label_sort_key(record: LabelRecord) -> tuple[str, str]:
     return record.sample_id, record.task_id
 
@@ -809,16 +758,34 @@ def _sorted_counter(counter: Counter[str]) -> dict[str, int]:
 
 
 def _split_config_from_metadata(metadata: Mapping[str, Any]) -> SplitConfig:
+    ratios = metadata.get("ratios")
+    if not isinstance(ratios, list) or len(ratios) != len(SPLIT_NAMES):
+        raise ManifestBuildError("Bundle metadata contains invalid ordered split ratios")
+    values: list[float] = []
+    for expected_name, entry in zip(SPLIT_NAMES, ratios, strict=True):
+        if not isinstance(entry, dict) or set(entry) != {"split_name", "ratio"}:
+            raise ManifestBuildError("Bundle metadata contains invalid ordered split ratios")
+        if entry.get("split_name") != expected_name:
+            raise ManifestBuildError("Bundle metadata contains invalid ordered split ratios")
+        ratio = entry.get("ratio")
+        if (
+            isinstance(ratio, bool)
+            or not isinstance(ratio, int | float)
+            or not math.isfinite(ratio)
+        ):
+            raise ManifestBuildError("Bundle metadata contains invalid ordered split ratios")
+        values.append(ratio)
     try:
-        ratios = metadata["ratios"]
-        return SplitConfig(
+        config = SplitConfig(
             seed=metadata["seed"],
-            train_ratio=ratios["train"],
-            validation_ratio=ratios["validation"],
-            test_ratio=ratios["test"],
+            train_ratio=values[0],
+            validation_ratio=values[1],
+            test_ratio=values[2],
         )
     except (KeyError, TypeError) as exc:
         raise ManifestBuildError("Bundle metadata contains an invalid split policy") from exc
+    config.validate()
+    return config
 
 
 def _validate_source_inventory(
@@ -837,8 +804,6 @@ def _validate_source_inventory(
     if ids != sorted(ids) or len(ids) != len(set(ids)) or set(ids) != set(expected):
         raise ManifestBuildError("Source inventory must provide ordered one-to-one sample coverage")
     for row in rows:
-        if row["dataset_id"] != DATASET_ID:
-            raise ManifestBuildError("Source inventory dataset_id must be 'rsna'")
         if row["relative_path"] != expected[row["sample_id"]]:
             raise ManifestBuildError("Source inventory path does not match the sample artifact")
         relative_path = PurePosixPath(row["relative_path"])
@@ -864,7 +829,6 @@ def _validate_metadata_counts(
     samples: pa.Table,
     labels: pa.Table,
     annotations: pa.Table,
-    splits: pa.Table,
     source_inventory: pa.Table,
 ) -> None:
     targets = {
@@ -883,8 +847,3 @@ def _validate_metadata_counts(
     for field, value in expected.items():
         if metadata.get(field) != value:
             raise ManifestBuildError(f"Bundle metadata {field} does not match artifact content")
-    split_metadata = metadata.get("split")
-    if not isinstance(split_metadata, dict) or split_metadata.get("summary") != split_summary(
-        splits, samples, labels
-    ):
-        raise ManifestBuildError("Bundle metadata split summary does not match artifact content")
