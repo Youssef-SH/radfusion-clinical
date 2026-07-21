@@ -38,6 +38,7 @@ def _run(
         "evaluation_scope": scope,
         "experiment_name": "experiment",
         "model": "metadata_logistic",
+        "model_package_id": "model-package-test",
         "dataset_bundle_id": "bundle",
         "split_assignment_id": "assignment",
         "seed": "42",
@@ -93,6 +94,7 @@ def test_comparison_is_regenerated_from_complete_mlflow_runs(tmp_path: Path) -> 
     assert list(table.columns) == list(COMPARISON_COLUMNS)
     assert set(table["run_id"]) == {validation_id, test_id}
     assert table.loc[table["run_id"] == test_id, "parent_training_run_id"].iloc[0] == validation_id
+    assert set(table["model_package_id"]) == {"model-package-test"}
     assert "Metadata experiment comparison" in markdown_path.read_text(encoding="utf-8")
 
 

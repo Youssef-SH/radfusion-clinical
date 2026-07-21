@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,11 +18,24 @@ from radfusion.data.rsna_artifacts import build_and_write
 from radfusion.data.tabular_preprocess import SOURCE_FEATURES
 from radfusion.training.config import load_experiment_config
 from radfusion.training.datasets import RsnaDataset
-from radfusion.training.evaluate import _verify_training_lineage, evaluate_training_run
+from radfusion.training.evaluate import (
+    TestEvaluationResult as EvaluationResult,
+)
+from radfusion.training.evaluate import (
+    _verify_training_lineage,
+    evaluate_training_run,
+)
+from radfusion.training.evaluate import (
+    main as evaluate_main,
+)
 from radfusion.training.interfaces import DatasetLineage, DatasetPartition, DatasetRunData
 from radfusion.training.train_tabular import train_configured_experiment, validate_report_set
 from radfusion.utils.mlflow_utils import configure_mlflow
-from radfusion.utils.model_publication import validate_published_model
+from radfusion.utils.model_publication import (
+    model_package_id,
+    threshold_contract,
+    validate_published_model,
+)
 
 _SHA256 = "a" * 64
 
@@ -117,9 +129,13 @@ def _install_dataset(monkeypatch: pytest.MonkeyPatch) -> tuple[DatasetRunData, D
 def _fixed_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "radfusion.training.train_tabular.git_revision",
-        lambda: ("commit-synthetic", True),
+        lambda: ("commit-synthetic", False),
     )
     monkeypatch.setattr("radfusion.training.train_tabular.uv_lock_sha256", lambda: _SHA256)
+    monkeypatch.setattr(
+        "radfusion.training.evaluate.git_revision",
+        lambda: ("commit-synthetic", False),
+    )
     monkeypatch.setattr("radfusion.training.evaluate.uv_lock_sha256", lambda: _SHA256)
 
 
@@ -161,6 +177,10 @@ def test_train_then_explicit_test_evaluation_uses_separate_partitions_and_runs(
     assert training_run.data.tags["evaluation_scope"] == "validation"
     assert evaluation_run.data.tags["evaluation_scope"] == "test"
     assert evaluation_run.data.tags["source_training_run_id"] == training.run_id
+    assert evaluation_run.data.tags["model_package_id"] == training.model_package_id
+    assert evaluation_run.data.tags["git_commit"] == "commit-synthetic"
+    assert evaluation_run.data.tags["git_dirty"] == "false"
+    assert evaluation_run.data.tags["dependency_lock_sha256"] == _SHA256
     assert "test_average_precision" not in training_run.data.metrics
     assert "test_average_precision" in evaluation_run.data.metrics
     assert float(evaluation_run.data.tags["threshold_youden_j"]) == training.thresholds["youden_j"]
@@ -175,6 +195,8 @@ def test_train_then_explicit_test_evaluation_uses_separate_partitions_and_runs(
         "model_manifest.json",
     }
     assert set(manifest["thresholds"]) == {"youden_j", "target_sensitivity"}
+    assert manifest["model_package_id"] == training.model_package_id
+    assert training_run.data.tags["model_package_id"] == training.model_package_id
     validate_report_set(training.artifact_directory)
     validate_report_set(evaluation.artifact_directory)
     metrics = json.loads(
@@ -330,6 +352,8 @@ def test_training_archives_and_logs_loaded_config_bytes_after_source_mutation(
         "source_config_sha256",
         "dependency_lock_sha256",
         "local_model_sha256",
+        "model_package_id",
+        "git_dirty",
     ],
 )
 def test_evaluator_rejects_each_training_lineage_tag_mismatch(
@@ -349,11 +373,17 @@ def test_evaluator_rejects_each_training_lineage_tag_mismatch(
         "bundle_id": config.dataset.bundle_id,
         "split_assignment_id": "assignment-synthetic",
         "task": config.dataset.task_id,
+        "model": config.model.registry_key,
         "seed": config.training.seed,
         "git_commit": "commit-synthetic",
+        "git_dirty": False,
         "dependency_lock_sha256": _SHA256,
         "positive_class": 1,
         "model_sha256": model_hash,
+        "model_package_id": "model-package-test",
+        "threshold_contract": threshold_contract(
+            sensitivity_target=config.evaluation.sensitivity_target
+        ),
     }
     tags = {
         "dataset_bundle_id": manifest["bundle_id"],
@@ -362,19 +392,76 @@ def test_evaluator_rejects_each_training_lineage_tag_mismatch(
         "model": config.model.registry_key,
         "seed": str(manifest["seed"]),
         "git_commit": manifest["git_commit"],
+        "git_dirty": str(manifest["git_dirty"]).lower(),
         "source_config_sha256": manifest["source_config_sha256"],
         "dependency_lock_sha256": manifest["dependency_lock_sha256"],
         "local_model_sha256": manifest["model_sha256"],
+        "model_package_id": manifest["model_package_id"],
     }
     tags[tag_name] = "mismatch"
     run = SimpleNamespace(
         info=SimpleNamespace(run_id=run_id),
         data=SimpleNamespace(tags=tags),
     )
-    monkeypatch.setattr("radfusion.training.evaluate.uv_lock_sha256", lambda: _SHA256)
-
     with pytest.raises(ValueError, match=tag_name):
-        _verify_training_lineage(run, config, manifest, model_path)
+        _verify_training_lineage(
+            run,
+            config,
+            manifest,
+            model_path,
+            evaluator_commit="commit-synthetic",
+            evaluator_dirty=False,
+            evaluator_lock_hash=_SHA256,
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("dirty_package", "dirty training package"),
+        ("dirty_evaluator", "clean current working tree"),
+        ("commit_mismatch", "Git commit"),
+        ("lock_mismatch", "dependency lock"),
+    ],
+)
+def test_formal_evaluation_rejects_incompatible_source_before_test_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    message: str,
+) -> None:
+    _install_dataset(monkeypatch)
+    _fixed_provenance(monkeypatch)
+    if case == "dirty_package":
+        monkeypatch.setattr(
+            "radfusion.training.train_tabular.git_revision",
+            lambda: ("commit-synthetic", True),
+        )
+    config = _config(tmp_path)
+    training = _train(config, tmp_path)
+    if case == "dirty_evaluator":
+        monkeypatch.setattr(
+            "radfusion.training.evaluate.git_revision",
+            lambda: ("commit-synthetic", True),
+        )
+    elif case == "commit_mismatch":
+        monkeypatch.setattr(
+            "radfusion.training.evaluate.git_revision",
+            lambda: ("different-commit", False),
+        )
+    elif case == "lock_mismatch":
+        monkeypatch.setattr("radfusion.training.evaluate.uv_lock_sha256", lambda: "b" * 64)
+    test_loads = 0
+
+    def reject_test_load(self, dataset_config):
+        nonlocal test_loads
+        test_loads += 1
+        raise AssertionError("test data must not be loaded")
+
+    monkeypatch.setattr(RsnaDataset, "load_test", reject_test_load)
+    with pytest.raises(ValueError, match=message):
+        evaluate_training_run(training.run_id, tracking_uri=_tracking_uri(tmp_path))
+    assert test_loads == 0
 
 
 @pytest.mark.parametrize("policy", ["youden_j", "target_sensitivity"])
@@ -390,7 +477,9 @@ def test_evaluator_rejects_validation_threshold_mismatch_before_test_loading(
     manifest_path = training.model_path.parent / "model_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["thresholds"][policy] = 0.0 if manifest["thresholds"][policy] > 0.5 else 1.0
+    manifest["model_package_id"] = model_package_id(manifest)
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _client(tmp_path).set_tag(training.run_id, "model_package_id", manifest["model_package_id"])
     test_loads = 0
 
     def reject_test_load(self, dataset_config):
@@ -418,7 +507,9 @@ def test_evaluator_rejects_lightgbm_best_iteration_mismatch_before_test_loading(
     manifest_path = training.model_path.parent / "model_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["best_iteration"] += 1
+    manifest["model_package_id"] = model_package_id(manifest)
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _client(tmp_path).set_tag(training.run_id, "model_package_id", manifest["model_package_id"])
     monkeypatch.setattr(
         RsnaDataset,
         "load_test",
@@ -461,6 +552,104 @@ def test_evaluation_report_publication_failure_does_not_complete_run(
     assert runs[0].data.tags["run_complete"] != "true"
 
 
+def test_evaluator_cli_serializes_completed_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = EvaluationResult(
+        run_id="evaluation-run",
+        training_run_id="training-run",
+        artifact_directory=tmp_path / "reports",
+        average_precision=0.75,
+    )
+
+    def evaluate(run_id: str, *, tracking_uri: str) -> EvaluationResult:
+        assert run_id == "training-run"
+        assert tracking_uri == "sqlite:///test.db"
+        return result
+
+    monkeypatch.setattr("radfusion.training.evaluate.evaluate_training_run", evaluate)
+
+    assert evaluate_main(["--run-id", "training-run", "--tracking-uri", "sqlite:///test.db"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "training_run_id": "training-run",
+        "test_evaluation_run_id": "evaluation-run",
+        "test_average_precision": 0.75,
+        "artifact_directory": (tmp_path / "reports").as_posix(),
+    }
+
+
+def test_clean_and_purge_generated_have_distinct_scopes(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    for path in (
+        "reports/keep.txt",
+        "models/keep.txt",
+        "mlartifacts/keep.txt",
+        "mlruns/keep.txt",
+        "mlflow.db",
+        "data/manifests/rsna/builds/build-test/bundle.txt",
+        "data/manifests/rsna/CURRENT",
+        ".pytest_cache/cache.txt",
+        "src/__pycache__/module.pyc",
+        "reports/.run-staging-test/partial.txt",
+        "reports/.comparison.tmp",
+        ".git/keep.txt",
+        ".venv/__pycache__/keep.pyc",
+        "data/raw/rsna/__pycache__/keep.pyc",
+    ):
+        target = workspace / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("keep\n", encoding="utf-8")
+    makefile = Path("Makefile").resolve()
+
+    clean = subprocess.run(
+        ["make", "-f", str(makefile), "-C", str(workspace), "clean"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert clean.returncode == 0, clean.stderr
+    for path in (
+        "reports/keep.txt",
+        "models/keep.txt",
+        "mlartifacts/keep.txt",
+        "mlruns/keep.txt",
+        "mlflow.db",
+        "data/manifests/rsna/builds/build-test/bundle.txt",
+        "data/manifests/rsna/CURRENT",
+        ".git/keep.txt",
+        ".venv/__pycache__/keep.pyc",
+        "data/raw/rsna/__pycache__/keep.pyc",
+    ):
+        assert (workspace / path).is_file()
+    for path in (
+        ".pytest_cache",
+        "src/__pycache__",
+        "reports/.run-staging-test",
+        "reports/.comparison.tmp",
+    ):
+        assert not (workspace / path).exists()
+
+    purge = subprocess.run(
+        ["make", "-f", str(makefile), "-C", str(workspace), "purge-generated"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert purge.returncode == 0, purge.stderr
+    for path in ("reports", "models", "mlartifacts", "mlruns", "mlflow.db"):
+        assert not (workspace / path).exists()
+    assert not (workspace / "data/manifests/rsna/CURRENT").exists()
+    assert not (workspace / "data/manifests/rsna/builds/build-test").exists()
+    for path in (
+        ".git/keep.txt",
+        ".venv/__pycache__/keep.pyc",
+        "data/raw/rsna/__pycache__/keep.pyc",
+    ):
+        assert (workspace / path).is_file()
+
+
 @pytest.mark.integration
 def test_synthetic_raw_source_to_bundle_training_and_explicit_test_evaluation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -468,10 +657,7 @@ def test_synthetic_raw_source_to_bundle_training_and_explicit_test_evaluation(
     raw_root = _write_raw_source(tmp_path / "raw")
     manifest_root = tmp_path / "manifests"
     bundle = build_and_write(raw_root, manifest_root)
-    monkeypatch.setattr(
-        "radfusion.training.train_tabular.git_revision",
-        lambda: ("commit-synthetic", True),
-    )
+    _fixed_provenance(monkeypatch)
     config = _config(
         tmp_path,
         bundle_id=bundle.paths.bundle_id,
@@ -480,24 +666,9 @@ def test_synthetic_raw_source_to_bundle_training_and_explicit_test_evaluation(
 
     tracking_uri = _tracking_uri(tmp_path)
     training = train_configured_experiment(config, tracking_uri=tracking_uri)
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "radfusion.training.evaluate",
-            "--run-id",
-            training.run_id,
-            "--tracking-uri",
-            tracking_uri,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert completed.returncode == 0, completed.stderr
-    output = json.loads(completed.stdout)
-    evaluation_run_id = output["test_evaluation_run_id"]
-    evaluation_directory = Path(output["artifact_directory"])
+    evaluation = evaluate_training_run(training.run_id, tracking_uri=tracking_uri)
+    evaluation_run_id = evaluation.run_id
+    evaluation_directory = evaluation.artifact_directory
 
     assert training.artifact_directory.is_dir()
     assert evaluation_directory.is_dir()

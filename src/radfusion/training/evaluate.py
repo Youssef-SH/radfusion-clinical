@@ -16,6 +16,7 @@ from mlflow.exceptions import MlflowException
 from sqlalchemy.exc import SQLAlchemyError
 
 from radfusion.data.hashing import sha256_file
+from radfusion.data.tabular_preprocess import validate_metadata_pipeline
 from radfusion.evaluation.latency import benchmark_single_sample_latency_ms
 from radfusion.evaluation.metrics import evaluate_operating_point, evaluate_probabilities
 from radfusion.evaluation.probabilities import positive_class_probabilities
@@ -30,10 +31,11 @@ from radfusion.training.train_tabular import (
 from radfusion.utils.mlflow_utils import (
     DEFAULT_TRACKING_URI,
     configure_mlflow,
+    git_revision,
     tracked_run,
     uv_lock_sha256,
 )
-from radfusion.utils.model_publication import validate_published_model
+from radfusion.utils.model_publication import threshold_contract, validate_published_model
 from radfusion.utils.privacy import validate_public_reports
 from radfusion.utils.publication import publish_directory, staging_directory
 from radfusion.utils.skops_io import load_skops
@@ -68,7 +70,18 @@ def evaluate_training_run(
     package = model_path.parent
     manifest = validate_published_model(package)
     config = load_experiment_config(package / "resolved_config.yaml")
-    _verify_training_lineage(source_run, config, manifest, model_path)
+    evaluator_commit, evaluator_dirty = git_revision()
+    evaluator_lock_hash = uv_lock_sha256()
+    _verify_training_lineage(
+        source_run,
+        config,
+        manifest,
+        model_path,
+        evaluator_commit=evaluator_commit,
+        evaluator_dirty=evaluator_dirty,
+        evaluator_lock_hash=evaluator_lock_hash,
+    )
+    model = validate_metadata_pipeline(load_skops(model_path))
     dataset_implementation = get_dataset(config.dataset.registry_key)
     pinned_lineage = dataset_implementation.load_lineage(config.dataset)
     if (
@@ -97,6 +110,10 @@ def evaluate_training_run(
         "model": config.model.registry_key,
         "seed": str(manifest["seed"]),
         "model_sha256": manifest["model_sha256"],
+        "model_package_id": manifest["model_package_id"],
+        "git_commit": evaluator_commit,
+        "git_dirty": str(evaluator_dirty).lower(),
+        "dependency_lock_sha256": evaluator_lock_hash,
         "run_complete": "false",
     }
     with tracked_run(
@@ -117,7 +134,6 @@ def evaluate_training_run(
             or lineage.task_id != manifest["task"]
         ):
             raise ValueError("Test bundle lineage differs from the trained model")
-        model = load_skops(model_path)
         probabilities = positive_class_probabilities(
             model,
             test.features,
@@ -203,7 +219,16 @@ def evaluate_training_run(
     )
 
 
-def _verify_training_lineage(run, config: ExperimentConfig, manifest, model_path: Path) -> None:
+def _verify_training_lineage(
+    run,
+    config: ExperimentConfig,
+    manifest,
+    model_path: Path,
+    *,
+    evaluator_commit: str,
+    evaluator_dirty: bool,
+    evaluator_lock_hash: str,
+) -> None:
     tags = run.data.tags
     expected_package = config.training.model_directory / "runs" / run.info.run_id
     if model_path.parent.resolve() != expected_package.resolve():
@@ -215,8 +240,8 @@ def _verify_training_lineage(run, config: ExperimentConfig, manifest, model_path
         "bundle_id": config.dataset.bundle_id,
         "task": config.dataset.task_id,
         "seed": config.training.seed,
+        "model": config.model.registry_key,
         "model_sha256": sha256_file(model_path),
-        "dependency_lock_sha256": uv_lock_sha256(),
     }
     for field, expected in checks.items():
         if manifest[field] != expected:
@@ -230,14 +255,28 @@ def _verify_training_lineage(run, config: ExperimentConfig, manifest, model_path
         "model": config.model.registry_key,
         "seed": str(manifest["seed"]),
         "git_commit": manifest["git_commit"],
+        "git_dirty": str(manifest["git_dirty"]).lower(),
         "source_config_sha256": manifest["source_config_sha256"],
         "dependency_lock_sha256": manifest["dependency_lock_sha256"],
         "local_model_sha256": manifest["model_sha256"],
+        "model_package_id": manifest["model_package_id"],
     }
     for name, expected in expected_tags.items():
         if tags.get(name) != expected:
             raise ValueError(f"Training run tag {name} mismatch")
     _verify_validation_choices(run, config, manifest)
+    if manifest["threshold_contract"] != threshold_contract(
+        sensitivity_target=config.evaluation.sensitivity_target,
+    ):
+        raise ValueError("Model threshold contract differs from the resolved configuration")
+    if manifest["git_dirty"]:
+        raise ValueError("Formal test evaluation rejects a dirty training package")
+    if evaluator_dirty:
+        raise ValueError("Formal test evaluation requires a clean current working tree")
+    if evaluator_commit != manifest["git_commit"]:
+        raise ValueError("Current Git commit does not match the model package")
+    if evaluator_lock_hash != manifest["dependency_lock_sha256"]:
+        raise ValueError("Current dependency lock does not match the model package")
 
 
 def _verify_validation_choices(run, config: ExperimentConfig, manifest) -> None:

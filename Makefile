@@ -1,5 +1,5 @@
 .PHONY: sync lock-check lint format format-check test check inspect rsna-manifest rsna-audit \
-	train evaluate compare pre-commit clean
+	train evaluate compare pre-commit clean purge-generated
 
 # Cleanup searches preserve repository metadata, environments, and source data.
 CLEAN_FIND_PRUNE = \( -path './.git' -o -path './.venv' -o -path './data/raw' \) -prune -o
@@ -50,10 +50,6 @@ pre-commit:
 
 clean:
 	@set -eu; \
-	output_count=0; \
-	for path in reports models mlartifacts mlflow.db mlflow.db-wal mlflow.db-shm; do \
-		if [ -e "$$path" ]; then rm -rf -- "$$path"; output_count=$$((output_count + 1)); fi; \
-	done; \
 	cache_count=0; \
 	for path in .pytest_cache .ruff_cache .mypy_cache; do \
 		if [ -e "$$path" ]; then rm -rf -- "$$path"; cache_count=$$((cache_count + 1)); fi; \
@@ -66,6 +62,23 @@ clean:
 		-type f -name '*.pyc' -print | wc -l); \
 	find . $(CLEAN_FIND_PRUNE) \
 		-type f -name '*.pyc' -exec rm -f -- {} +; \
+	staging_count=$$(find . $(CLEAN_FIND_PRUNE) -type d \
+		\( -name '.staging-*' -o -name '.*-staging-*' -o -name '.*-backup-*' \) \
+		-print | wc -l); \
+	find . $(CLEAN_FIND_PRUNE) -type d \
+		\( -name '.staging-*' -o -name '.*-staging-*' -o -name '.*-backup-*' \) \
+		-prune -exec rm -rf -- {} +; \
+	temporary_count=$$(find . $(CLEAN_FIND_PRUNE) -type f -name '.*.tmp' -print | wc -l); \
+	find . $(CLEAN_FIND_PRUNE) -type f -name '.*.tmp' -exec rm -f -- {} +; \
+	printf 'Removed %s cache directories, %s __pycache__ directories, %s .pyc files, %s staging directories, and %s temporary files.\n' \
+		"$$cache_count" "$$pycache_count" "$$pyc_count" "$$staging_count" "$$temporary_count"
+
+purge-generated: clean
+	@set -eu; \
+	output_count=0; \
+	for path in reports models mlruns mlartifacts mlflow.db mlflow.db-wal mlflow.db-shm; do \
+		if [ -e "$$path" ]; then rm -rf -- "$$path"; output_count=$$((output_count + 1)); fi; \
+	done; \
 	bundle_count=0; current_count=0; \
 	if [ -d data/manifests ]; then \
 		bundle_count=$$(find data/manifests -type d -name 'build-*' -print | wc -l); \
@@ -74,5 +87,5 @@ clean:
 		find data/manifests \( -type f -o -type l \) -name CURRENT -exec rm -f -- {} +; \
 		find data/manifests -depth -type d -empty ! -path data/manifests -exec rmdir -- {} \;; \
 	fi; \
-	printf 'Removed %s output directories, %s cache directories, %s __pycache__ directories, %s .pyc files, %s bundles, and %s CURRENT pointers.\n' \
-		"$$output_count" "$$cache_count" "$$pycache_count" "$$pyc_count" "$$bundle_count" "$$current_count"
+	printf 'Purged %s generated output paths, %s bundles, and %s CURRENT pointers.\n' \
+		"$$output_count" "$$bundle_count" "$$current_count"

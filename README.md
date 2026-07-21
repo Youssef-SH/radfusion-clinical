@@ -45,7 +45,8 @@ make train CONFIG=configs/metadata_logistic.yaml
 make train CONFIG=configs/metadata_lightgbm.yaml
 make evaluate RUN_ID=<training-run-id>
 make compare         # regenerate CSV and Markdown comparison views from MLflow
-make clean           # remove reproducible outputs while preserving raw datasets
+make clean           # remove caches and interrupted-publication staging state
+make purge-generated # deliberately remove all reproducible generated outputs
 make check           # lock consistency, Ruff checks, and unit/contract tests
 make pre-commit      # run repository hooks against all tracked files
 make inspect FILE=path/to/image.dcm
@@ -60,9 +61,10 @@ Every executable experiment is declared by a validated YAML file under `configs/
 
 ## Cleaning generated artifacts
 
-Run `make clean` to remove generated reports, models, MLflow database and artifacts, Python
-caches, and bundles. Git ignores these outputs, and the pipeline regenerates them from source
-data. Raw source datasets remain under `data/raw/`.
+Run `make clean` for disposable caches and temporary publication state. It preserves completed
+bundles, reports, model packages, and experiment history. Run `make purge-generated` to remove
+those reproducible outputs deliberately. Both commands preserve raw source datasets under
+`data/raw/`.
 
 ## Repository layout
 

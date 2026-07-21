@@ -52,6 +52,9 @@ The RSNA adapter exposes these model features:
 Preprocessing rejects additional columns. Sample IDs, patient IDs, image paths, targets,
 partitions, and lineage remain separate from the feature frame. Imputation, categories,
 missingness indicators, scaling, and class weighting are derived from training data.
+The model package records this ordered input contract, its type categories and missing-value
+semantics, and the policy version. The fitted preprocessing pipeline is embedded in
+`model.skops`.
 
 ## Execution
 
@@ -68,9 +71,11 @@ train and validation only. It fits preprocessing and the estimator on train, use
 LightGBM early stopping, selects both operating thresholds on validation, and publishes the fitted
 model.
 
-Test evaluation is a separate run. Before reading test data, it cross-checks the package,
-configuration, model bytes, pinned bundle, source-run tags, validation-derived thresholds, and
-LightGBM best iteration. It then reads only test and applies the verified choices unchanged.
+Test evaluation is a separate run. Before reading test data, it validates the package and its
+semantic ID, source-run lineage, configuration and model hashes, fitted input contract,
+validation-derived choices, and LightGBM best iteration. Formal evaluation accepts packages from
+clean training commits and requires the evaluator to use the same clean Git commit and
+dependency lock. It then reads only test and applies the verified choices unchanged.
 
 The built-in dataset and model adapters are held in immutable mappings. One tabular runner owns
 training; the explicit evaluator owns test evaluation.
@@ -101,8 +106,15 @@ models/rsna/runs/<training-run-id>/
   model_manifest.json
 ```
 
-The manifest records the model hash, training run, pinned bundle and split assignment, task,
-positive class, config hash, seed, Git commit, dependency lock, best iteration, and thresholds.
+The manifest records `model_package_schema_version` and a deterministic `model_package_id` over
+the model and config hashes, training run, bundle and split assignment, task, model family, seed,
+Git and dependency state, best iteration, validation thresholds, threshold policies, and ordered
+input contract. Paths, timestamps, hosts, commands, tracking URIs, and report locations are
+outside this identity.
+
+Dirty training runs may publish traceable packages, but those packages are ineligible for formal
+test evaluation. Test-evaluation runs record their own Git and dependency provenance, the model
+package ID, and their source training run.
 
 Each training or test-evaluation run publishes aggregate reports under
 `reports/rsna/runs/<run-id>/`:
@@ -120,7 +132,7 @@ confusion_matrix_target_sensitivity.png
 
 Publication requires exactly this set after privacy validation. `make compare` deterministically
 regenerates `reports/model_comparison_table.csv` and `.md` from complete, finite MLflow records.
-Failed, unfinished, and incomplete runs are excluded.
+Rows include the model package ID; failed, unfinished, and incomplete runs are excluded.
 
 The training, evaluation, and comparison CLIs default to `sqlite:///mlflow.db` and accept
 `--tracking-uri` when an isolated local SQLite database is required.

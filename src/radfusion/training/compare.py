@@ -21,6 +21,7 @@ COMPARISON_COLUMNS = (
     "parent_training_run_id",
     "experiment_name",
     "model",
+    "model_package_id",
     "bundle_id",
     "split_assignment_id",
     "seed",
@@ -47,6 +48,7 @@ COMPARISON_COLUMNS = (
 _COMMON_TAGS = (
     "experiment_name",
     "model",
+    "model_package_id",
     "dataset_bundle_id",
     "split_assignment_id",
     "seed",
@@ -156,6 +158,7 @@ def _has_matching_training_parent(
         for field in (
             "experiment_name",
             "model",
+            "model_package_id",
             "bundle_id",
             "split_assignment_id",
             "seed",
@@ -188,6 +191,7 @@ def _comparison_record(run) -> dict[str, object] | None:
         "parent_training_run_id": parent,
         "experiment_name": tags["experiment_name"],
         "model": tags["model"],
+        "model_package_id": tags["model_package_id"],
         "bundle_id": tags["dataset_bundle_id"],
         "split_assignment_id": tags["split_assignment_id"],
         "seed": tags["seed"],

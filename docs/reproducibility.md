@@ -77,9 +77,10 @@ training data. Validation selects the LightGBM stopping point and both operating
 test in a separate linked run.
 
 Training runs record the Git commit and dirty status, exact configuration bytes and hash,
-dependency-lock hash, environment, dataset identity, and model lineage. Exact reconstruction of a
-dirty run requires preserving its uncommitted source state separately. Test-evaluation runs record
-the model and dataset lineage they use and link to the verified source training run.
+dependency-lock hash, environment, dataset identity, and model lineage. Formal test evaluation
+requires a package produced from the evaluator's clean Git commit and matching dependency lock.
+Test-evaluation runs record their own code and lock provenance and link the verified model package
+to its source training run.
 
 ## Probability and operating-point metrics
 
@@ -136,7 +137,8 @@ report references. The artifact ownership contract is defined in [`training.md`]
 
 Run metadata is stored in `mlflow.db`, and training configuration artifacts are stored under
 `mlartifacts/`. Model packages live under `models/`, and reports live under `reports/`. These
-locations are generated state and are removed by `make clean`.
+locations are generated state. `make clean` preserves completed outputs and removes caches and
+interrupted-publication staging state.
 
 ## Quality gates
 
@@ -155,5 +157,5 @@ available:
 uv run pytest -m integration
 ```
 
-Generated bundles, reports, models, and MLflow state can be deleted with `make clean` and rebuilt.
-Raw datasets remain user-managed external inputs.
+Generated bundles, reports, models, and MLflow state can be deliberately deleted with
+`make purge-generated` and rebuilt. Raw datasets remain user-managed external inputs.

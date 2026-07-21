@@ -16,6 +16,7 @@ import mlflow
 import numpy as np
 
 from radfusion.data.hashing import sha256_file
+from radfusion.data.tabular_preprocess import metadata_input_contract, validate_metadata_pipeline
 from radfusion.evaluation.latency import LATENCY_SAMPLE_POLICY, benchmark_single_sample_latency_ms
 from radfusion.evaluation.metrics import (
     CALIBRATION_BINNING_STRATEGY,
@@ -38,7 +39,7 @@ from radfusion.utils.mlflow_utils import (
     tracked_run,
     uv_lock_sha256,
 )
-from radfusion.utils.model_publication import publish_model_run
+from radfusion.utils.model_publication import publish_model_run, threshold_contract
 from radfusion.utils.privacy import validate_public_reports
 from radfusion.utils.publication import publish_directory, staging_directory
 from radfusion.utils.skops_io import load_skops, save_skops
@@ -69,6 +70,7 @@ class ModelResult:
     thresholds: dict[str, float]
     model_path: Path
     model_sha256: str
+    model_package_id: str
     artifact_directory: Path
     latency_ms: float
     model_size_mib: float
@@ -202,6 +204,7 @@ def train_configured_experiment(
             )
             serialized = save_skops(model_fit.pipeline, temporary_model_root / "model.skops")
             restored = load_skops(serialized)
+            validate_metadata_pipeline(restored)
             restored_probabilities = positive_class_probabilities(
                 restored,
                 dataset.validation.features,
@@ -235,12 +238,18 @@ def train_configured_experiment(
                     "split_assignment_id": dataset.lineage.split_assignment_id,
                     "task": dataset.lineage.task_id,
                     "positive_class": 1,
+                    "model": config.model.registry_key,
                     "source_config_sha256": config.source_sha256,
                     "seed": config.training.seed,
                     "git_commit": commit,
+                    "git_dirty": dirty,
                     "dependency_lock_sha256": lock_hash,
                     "best_iteration": best_iteration,
                     "thresholds": thresholds,
+                    "threshold_contract": threshold_contract(
+                        sensitivity_target=config.evaluation.sensitivity_target,
+                    ),
+                    "input_contract": metadata_input_contract(),
                 },
             )
             publish_directory(report_stage, report_directory)
@@ -248,6 +257,7 @@ def train_configured_experiment(
                 {
                     "local_model_path": published.model_path.as_posix(),
                     "local_model_sha256": published.model_sha256,
+                    "model_package_id": published.model_package_id,
                     "report_directory": report_directory.as_posix(),
                 }
             )
@@ -266,6 +276,7 @@ def train_configured_experiment(
         thresholds=thresholds,
         model_path=published.model_path,
         model_sha256=published.model_sha256,
+        model_package_id=published.model_package_id,
         artifact_directory=report_directory,
         latency_ms=latency_ms,
         model_size_mib=published.model_size_mib,

@@ -44,7 +44,7 @@ def test_mlflow_initialization_rejects_nonpersistent_local_backends(tracking_uri
         configure_mlflow(tracking_uri=tracking_uri)
 
 
-def test_make_clean_removes_sqlite_state_and_preserves_raw_data(tmp_path: Path) -> None:
+def test_make_purge_generated_removes_sqlite_state_and_preserves_raw_data(tmp_path: Path) -> None:
     for name in (
         "mlflow.db",
         "mlflow.db-wal",
@@ -61,7 +61,7 @@ def test_make_clean_removes_sqlite_state_and_preserves_raw_data(tmp_path: Path) 
     raw.write_text("source\n", encoding="utf-8")
 
     completed = subprocess.run(
-        ["make", "-f", str(Path("Makefile").resolve()), "clean"],
+        ["make", "-f", str(Path("Makefile").resolve()), "purge-generated"],
         cwd=tmp_path,
         check=False,
         capture_output=True,
