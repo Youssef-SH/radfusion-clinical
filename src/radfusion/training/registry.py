@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from types import MappingProxyType
 
+from radfusion.models.cxr_baseline import ImageDenseNetModel
 from radfusion.models.tabular_baseline import MetadataLightgbmModel, MetadataLogisticModel
 from radfusion.training.datasets import RsnaDataset
-from radfusion.training.interfaces import DatasetImplementation, ModelImplementation
+from radfusion.training.interfaces import (
+    DatasetImplementation,
+    ImageModelImplementation,
+    ModelImplementation,
+)
 
 
 class RegistryError(LookupError):
@@ -14,10 +19,11 @@ class RegistryError(LookupError):
 
 
 DATASETS: MappingProxyType[str, DatasetImplementation] = MappingProxyType({"rsna": RsnaDataset()})
-MODELS: MappingProxyType[str, ModelImplementation] = MappingProxyType(
+MODELS: MappingProxyType[str, ModelImplementation | ImageModelImplementation] = MappingProxyType(
     {
         "metadata_logistic": MetadataLogisticModel(),
         "metadata_lightgbm": MetadataLightgbmModel(),
+        "image_densenet": ImageDenseNetModel(),
     }
 )
 
@@ -27,7 +33,7 @@ def get_dataset(key: str) -> DatasetImplementation:
     return _get(DATASETS, key, "dataset")
 
 
-def get_model(key: str) -> ModelImplementation:
+def get_model(key: str) -> ModelImplementation | ImageModelImplementation:
     """Return one built-in model adapter."""
     return _get(MODELS, key, "model")
 

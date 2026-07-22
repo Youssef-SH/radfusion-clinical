@@ -10,6 +10,7 @@ from typing import Any, Protocol
 import numpy as np
 import pandas as pd
 from sklearn.pipeline import Pipeline
+from torch import nn
 
 from radfusion.training.config import DatasetConfig, ModelConfig
 
@@ -85,3 +86,10 @@ class ModelImplementation(Protocol):
         validation_targets: np.ndarray,
     ) -> ModelFitResult:
         """Fit one model from training data with validation monitoring."""
+
+
+class ImageModelImplementation(Protocol):
+    """Registered image model builder used by the future neural runner."""
+
+    def build(self, config: ModelConfig) -> nn.Module:
+        """Build an unfitted image model."""

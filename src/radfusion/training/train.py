@@ -33,6 +33,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         config = load_experiment_config(args.config)
+        if not config.executable:
+            raise ConfigError("This experiment configuration is not executable yet")
         result = train_configured_experiment(config, tracking_uri=args.tracking_uri)
     except (
         ConfigError,
