@@ -367,6 +367,11 @@ def validate_bundle_directory(
     enforce_directory_name: bool = True,
 ) -> dict[str, Any]:
     """Require complete metadata plus matching file and Arrow IPC hashes for a bundle."""
+    metadata = validate_bundle_reference(
+        bundle_directory,
+        expected_bundle_id=expected_bundle_id,
+        enforce_directory_name=enforce_directory_name,
+    )
     directory = Path(bundle_directory)
     expected_files = {
         SAMPLES_FILENAME: RSNA_SAMPLE_SCHEMA,
@@ -375,38 +380,14 @@ def validate_bundle_directory(
         SPLITS_FILENAME: RSNA_SPLIT_SCHEMA,
         SOURCE_INVENTORY_FILENAME: RSNA_SOURCE_INVENTORY_SCHEMA,
     }
-    _require_exact_regular_entries(directory, {METADATA_FILENAME, *expected_files})
-    metadata_path = directory / METADATA_FILENAME
-    try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ManifestBuildError(f"Bundle metadata is unreadable: {metadata_path}") from exc
     bundle_id = metadata.get("bundle", {}).get("bundle_id")
-    if expected_bundle_id is not None and bundle_id != expected_bundle_id:
-        raise ManifestBuildError(
-            f"Bundle metadata ID {bundle_id!r} does not match {expected_bundle_id!r}"
-        )
-    schema_version = metadata.get("manifest_schema_version")
-    if schema_version != MANIFEST_SCHEMA_VERSION:
-        raise ManifestBuildError(f"Unsupported manifest_schema_version: {schema_version!r}")
     split_config = _validate_manifest_contract(metadata)
     hashes = metadata.get("generated_artifact_hashes", {})
-    if not isinstance(hashes, dict) or set(hashes) != set(expected_files):
-        raise ManifestBuildError("Bundle metadata declares an unexpected artifact set")
     actual_arrow_hashes: dict[str, str] = {}
-    for filename, schema in expected_files.items():
+    for filename in expected_files:
         path = directory / filename
         declared = hashes.get(filename)
-        if not isinstance(declared, dict):
-            raise ManifestBuildError(f"Bundle is incomplete: {filename}")
-        actual_file_hash = sha256_file(path)
-        if actual_file_hash != declared.get("file_sha256"):
-            raise ManifestBuildError(f"File hash mismatch for {filename}")
         table = pq.read_table(path)
-        try:
-            require_exact_schema(table, schema, filename)
-        except ValueError as exc:
-            raise ManifestBuildError(str(exc)) from exc
         actual_arrow_hash = arrow_ipc_sha256(table)
         actual_arrow_hashes[filename] = actual_arrow_hash
         if actual_arrow_hash != declared.get("arrow_ipc_sha256"):
@@ -417,8 +398,6 @@ def validate_bundle_directory(
         raise ManifestBuildError("Bundle metadata is missing identity fields") from exc
     if computed_bundle_id != bundle_id:
         raise ManifestBuildError("Bundle ID does not match deterministic bundle content")
-    if enforce_directory_name and directory.name != bundle_id:
-        raise ManifestBuildError("Bundle directory name does not match manifest identity")
     samples = pq.read_table(directory / SAMPLES_FILENAME)
     labels = pq.read_table(directory / LABELS_FILENAME)
     annotations = pq.read_table(directory / ANNOTATIONS_FILENAME)
@@ -438,6 +417,70 @@ def validate_bundle_directory(
         raise ManifestBuildError("Split assignment identity does not match the split artifact")
     _validate_source_inventory(source_inventory, samples)
     _validate_metadata_counts(metadata, samples, labels, annotations, source_inventory)
+    return metadata
+
+
+def validate_bundle_reference(
+    bundle_directory: str | Path,
+    *,
+    expected_bundle_id: str | None = None,
+    expected_metadata_sha256: str | None = None,
+    enforce_directory_name: bool = True,
+) -> dict[str, Any]:
+    """Validate bundle identity and schemas without materializing artifact rows."""
+    directory = Path(bundle_directory)
+    expected_files = {
+        SAMPLES_FILENAME: RSNA_SAMPLE_SCHEMA,
+        LABELS_FILENAME: RSNA_LABEL_SCHEMA,
+        ANNOTATIONS_FILENAME: RSNA_ANNOTATION_SCHEMA,
+        SPLITS_FILENAME: RSNA_SPLIT_SCHEMA,
+        SOURCE_INVENTORY_FILENAME: RSNA_SOURCE_INVENTORY_SCHEMA,
+    }
+    _require_exact_regular_entries(directory, {METADATA_FILENAME, *expected_files})
+    metadata_path = directory / METADATA_FILENAME
+    if expected_metadata_sha256 is not None:
+        if not _sha256_text(expected_metadata_sha256):
+            raise ManifestBuildError("Expected bundle metadata SHA-256 is invalid")
+        if sha256_file(metadata_path) != expected_metadata_sha256:
+            raise ManifestBuildError("Bundle metadata SHA-256 does not match the configured pin")
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ManifestBuildError(f"Bundle metadata is unreadable: {metadata_path}") from exc
+    bundle_id = metadata.get("bundle", {}).get("bundle_id")
+    if expected_bundle_id is not None and bundle_id != expected_bundle_id:
+        raise ManifestBuildError(
+            f"Bundle metadata ID {bundle_id!r} does not match {expected_bundle_id!r}"
+        )
+    schema_version = metadata.get("manifest_schema_version")
+    if schema_version != MANIFEST_SCHEMA_VERSION:
+        raise ManifestBuildError(f"Unsupported manifest_schema_version: {schema_version!r}")
+    _validate_manifest_contract(metadata)
+    hashes = metadata.get("generated_artifact_hashes", {})
+    if not isinstance(hashes, dict) or set(hashes) != set(expected_files):
+        raise ManifestBuildError("Bundle metadata declares an unexpected artifact set")
+    declared_arrow_hashes: dict[str, str] = {}
+    for filename, schema in expected_files.items():
+        path = directory / filename
+        declared = hashes.get(filename)
+        if not isinstance(declared, dict):
+            raise ManifestBuildError(f"Bundle is incomplete: {filename}")
+        if sha256_file(path) != declared.get("file_sha256"):
+            raise ManifestBuildError(f"File hash mismatch for {filename}")
+        if pq.read_schema(path) != schema:
+            raise ManifestBuildError(f"{filename} schema mismatch")
+        arrow_hash = declared.get("arrow_ipc_sha256")
+        if not _sha256_text(arrow_hash):
+            raise ManifestBuildError(f"Arrow IPC hash declaration is invalid for {filename}")
+        declared_arrow_hashes[filename] = arrow_hash
+    try:
+        computed_bundle_id = _bundle_id(declared_arrow_hashes, metadata)
+    except (KeyError, TypeError) as exc:
+        raise ManifestBuildError("Bundle metadata is missing identity fields") from exc
+    if computed_bundle_id != bundle_id:
+        raise ManifestBuildError("Bundle ID does not match deterministic bundle content")
+    if enforce_directory_name and directory.name != bundle_id:
+        raise ManifestBuildError("Bundle directory name does not match manifest identity")
     return metadata
 
 
@@ -731,6 +774,14 @@ def _bundle_paths(bundle_id: str, directory: Path, current_path: Path) -> Bundle
         directory / SOURCE_INVENTORY_FILENAME,
         directory / METADATA_FILENAME,
         current_path,
+    )
+
+
+def _sha256_text(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
     )
 
 

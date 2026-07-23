@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -75,6 +76,7 @@ class DatasetConfig:
     registry_key: str
     manifest_directory: Path
     bundle_id: str
+    bundle_metadata_sha256: str | None
     task_id: str
     dataset_root: Path | None
 
@@ -161,6 +163,36 @@ class ExperimentConfig:
     source_sha256: str
 
 
+def image_semantic_config_sha256(config: ExperimentConfig) -> str:
+    """Hash the meaning-bearing, path-independent image experiment configuration."""
+    if config.model.modality != "image" or config.image is None:
+        raise ConfigError("Semantic image configuration requires image modality")
+    payload = {
+        "config_version": config.config_version,
+        "dataset": {
+            "registry_key": config.dataset.registry_key,
+            "bundle_id": config.dataset.bundle_id,
+            "bundle_metadata_sha256": config.dataset.bundle_metadata_sha256,
+            "task_id": config.dataset.task_id,
+        },
+        "model": {
+            "registry_key": config.model.registry_key,
+            "modality": config.model.modality,
+            "parameters": dict(config.model.parameters),
+            "fit_parameters": dict(config.model.fit_parameters),
+        },
+        "training": {"seed": config.training.seed},
+        "evaluation": {
+            "sensitivity_target": config.evaluation.sensitivity_target,
+            "calibration_bins": config.evaluation.calibration_bins,
+        },
+        "image": asdict(config.image),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    ).hexdigest()
+
+
 def load_experiment_config(path: str | Path) -> ExperimentConfig:
     """Load and validate an experiment YAML file."""
     source = Path(path)
@@ -202,8 +234,8 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
             raise ConfigError("Image experiments require an image configuration section")
         if dataset.dataset_root is None:
             raise ConfigError("Image experiments require dataset.dataset_root")
-        if executable:
-            raise ConfigError("The image foundation configuration must be non-executable")
+        if dataset.bundle_metadata_sha256 is None:
+            raise ConfigError("Image experiments require dataset.bundle_metadata_sha256")
     else:
         if model.registry_key not in {"metadata_logistic", "metadata_lightgbm"}:
             raise ConfigError("Metadata experiments require a registered metadata model")
@@ -232,13 +264,18 @@ def _dataset_config(value: object) -> DatasetConfig:
     _keys(
         data,
         required={"registry_key", "manifest_directory", "bundle_id", "task_id"},
-        optional={"dataset_root"},
+        optional={"dataset_root", "bundle_metadata_sha256"},
         context="dataset",
     )
     return DatasetConfig(
         registry_key=_path_component(data["registry_key"], "dataset.registry_key"),
         manifest_directory=Path(_text(data["manifest_directory"], "dataset.manifest_directory")),
         bundle_id=_path_component(data["bundle_id"], "dataset.bundle_id"),
+        bundle_metadata_sha256=(
+            _sha256(data["bundle_metadata_sha256"], "dataset.bundle_metadata_sha256")
+            if "bundle_metadata_sha256" in data
+            else None
+        ),
         task_id=_text(data["task_id"], "dataset.task_id"),
         dataset_root=(
             Path(_text(data["dataset_root"], "dataset.dataset_root"))
@@ -246,6 +283,13 @@ def _dataset_config(value: object) -> DatasetConfig:
             else None
         ),
     )
+
+
+def _sha256(value: object, field: str) -> str:
+    text = _text(value, field)
+    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+        raise ConfigError(f"{field} must be exactly 64 lowercase hexadecimal characters")
+    return text
 
 
 def _model_config(value: object) -> ModelConfig:

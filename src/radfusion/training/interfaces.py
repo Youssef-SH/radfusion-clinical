@@ -72,6 +72,12 @@ class DatasetImplementation(Protocol):
     def load_test(self, config: DatasetConfig) -> tuple[DatasetPartition, DatasetLineage]:
         """Load only the test partition and its pinned lineage."""
 
+    def load_image_train_validation(self, config: DatasetConfig) -> Any:
+        """Load and authenticate image train and validation rows."""
+
+    def load_image_test(self, config: DatasetConfig) -> Any:
+        """Load and authenticate image test rows."""
+
 
 class ModelImplementation(Protocol):
     """Registered model implementation used by the experiment runner."""
@@ -89,7 +95,7 @@ class ModelImplementation(Protocol):
 
 
 class ImageModelImplementation(Protocol):
-    """Registered image model builder used by the future neural runner."""
+    """Registered image model builder used by the neural runner."""
 
     def build(self, config: ModelConfig) -> nn.Module:
         """Build an unfitted image model."""
