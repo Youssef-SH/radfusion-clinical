@@ -25,6 +25,11 @@ class ResolvedDevice:
     torch_version: str
     torchvision_version: str
     torchxrayvision_version: str
+    cuda_runtime_version: str | None = None
+    cudnn_version: int | None = None
+    gpu_device_name: str | None = None
+    gpu_device_index: int | None = None
+    gpu_compute_capability: tuple[int, int] | None = None
 
     def provenance(self) -> dict[str, Any]:
         """Return compact serializable runtime provenance."""
@@ -39,6 +44,15 @@ class ResolvedDevice:
             "torch_version": self.torch_version,
             "torchvision_version": self.torchvision_version,
             "torchxrayvision_version": self.torchxrayvision_version,
+            "cuda_runtime_version": self.cuda_runtime_version,
+            "cudnn_version": self.cudnn_version,
+            "gpu_device_name": self.gpu_device_name,
+            "gpu_device_index": self.gpu_device_index,
+            "gpu_compute_capability": (
+                list(self.gpu_compute_capability)
+                if self.gpu_compute_capability is not None
+                else None
+            ),
         }
 
 
@@ -65,6 +79,7 @@ def resolve_device(
         else "cpu"
     )
     use_cuda = resolved == "cuda"
+    device_index = torch.cuda.current_device() if use_cuda else None
     pin_requested = pin_memory_policy in {"auto", "enabled"}
     return ResolvedDevice(
         device=torch.device(resolved),
@@ -78,4 +93,11 @@ def resolve_device(
         torch_version=torch.__version__,
         torchvision_version=torchvision.__version__,
         torchxrayvision_version=torchxrayvision.__version__,
+        cuda_runtime_version=torch.version.cuda if use_cuda else None,
+        cudnn_version=torch.backends.cudnn.version() if use_cuda else None,
+        gpu_device_name=torch.cuda.get_device_name(device_index) if use_cuda else None,
+        gpu_device_index=device_index,
+        gpu_compute_capability=(
+            tuple(torch.cuda.get_device_capability(device_index)) if use_cuda else None
+        ),
     )

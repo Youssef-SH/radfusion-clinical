@@ -30,11 +30,19 @@ def test_auto_device_resolution_and_cpu_effective_policies(monkeypatch) -> None:
 
 def test_auto_cuda_resolution_enables_requested_policies(monkeypatch) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda index: f"GPU-{index}")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index: (8, 0))
+    monkeypatch.setattr(torch.backends.cudnn, "version", lambda: 9000)
+    monkeypatch.setattr(torch.version, "cuda", "12.1")
     runtime = resolve_device("auto", mixed_precision=True, pin_memory_policy="auto")
 
     assert runtime.device.type == "cuda"
     assert runtime.mixed_precision_effective is True
     assert runtime.pin_memory_effective is True
+    assert runtime.gpu_device_index == 1
+    assert runtime.gpu_device_name == "GPU-1"
+    assert runtime.gpu_compute_capability == (8, 0)
 
 
 def test_explicit_unavailable_cuda_fails(monkeypatch) -> None:

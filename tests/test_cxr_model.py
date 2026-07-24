@@ -12,6 +12,7 @@ from radfusion.models.cxr_baseline import (
     CxrBinaryClassifier,
     ImageDenseNetModel,
     StandardCxrEncoder,
+    authenticate_pretrained_weights,
 )
 from radfusion.training.config import load_experiment_config
 from radfusion.training.registry import MODELS, get_model
@@ -118,6 +119,90 @@ def test_image_builder_rejects_non_module_factory_output() -> None:
 
     with pytest.raises(TypeError, match="factory must return"):
         ImageDenseNetModel(encoder_factory=lambda **_: object()).build(config.model)
+
+
+def test_pretrained_weight_identity_authenticates_materialized_cache_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    filename = "weights.pt"
+    weight_path = tmp_path / filename
+    weight_path.write_bytes(b"authenticated-weights")
+    monkeypatch.setitem(
+        xrv.models.model_urls,
+        "synthetic-weights",
+        {"weights_url": f"https://example.invalid/{filename}"},
+    )
+    monkeypatch.setattr(xrv.utils, "get_cache_dir", lambda: str(tmp_path))
+
+    identity = authenticate_pretrained_weights("synthetic-weights")
+
+    assert identity.declared_name == "synthetic-weights"
+    assert identity.cache_filename == filename
+    assert identity.byte_size == len(b"authenticated-weights")
+    assert len(identity.sha256) == 64
+    weight_path.unlink()
+    with pytest.raises(FileNotFoundError, match="Materialized pretrained weight"):
+        authenticate_pretrained_weights("synthetic-weights")
+
+
+def test_pretrained_weight_identity_rejects_unknown_symlink_and_unnamed_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(ValueError, match="Unknown"):
+        authenticate_pretrained_weights("unknown-weight")
+
+    monkeypatch.setattr(xrv.utils, "get_cache_dir", lambda: str(tmp_path))
+    monkeypatch.setitem(
+        xrv.models.model_urls,
+        "unnamed-weight",
+        {"weights_url": "https://example.invalid/"},
+    )
+    with pytest.raises(ValueError, match="does not name"):
+        authenticate_pretrained_weights("unnamed-weight")
+
+    target = tmp_path / "target.pt"
+    target.write_bytes(b"weight")
+    (tmp_path / "link.pt").symlink_to(target)
+    monkeypatch.setitem(
+        xrv.models.model_urls,
+        "symlink-weight",
+        {"weights_url": "https://example.invalid/link.pt"},
+    )
+    with pytest.raises(FileNotFoundError, match="missing"):
+        authenticate_pretrained_weights("symlink-weight")
+
+
+def test_modified_pretrained_bytes_change_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "weight.pt"
+    path.write_bytes(b"first")
+    monkeypatch.setattr(xrv.utils, "get_cache_dir", lambda: str(tmp_path))
+    monkeypatch.setitem(
+        xrv.models.model_urls,
+        "mutable-weight",
+        {"weights_url": "https://example.invalid/weight.pt"},
+    )
+    first = authenticate_pretrained_weights("mutable-weight")
+    path.write_bytes(b"second")
+    second = authenticate_pretrained_weights("mutable-weight")
+
+    assert first.sha256 != second.sha256
+    assert first.byte_size != second.byte_size
+
+
+def test_evaluation_architecture_is_built_without_pretrained_cache_access() -> None:
+    observed_weights = []
+
+    def factory(**kwargs):
+        observed_weights.append(kwargs["weights"])
+        return _TinyEncoder(**kwargs)
+
+    config = load_experiment_config("configs/image_densenet.yaml")
+    model = ImageDenseNetModel(encoder_factory=factory).build_architecture(config.model)
+
+    assert isinstance(model, CxrBinaryClassifier)
+    assert observed_weights == [None]
 
 
 # This warning comes from TorchXRayVision's legacy serialized upstream checkpoint.

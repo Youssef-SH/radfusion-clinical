@@ -3,11 +3,30 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from urllib.parse import urlparse
 
 import torch
 from torch import nn
 
+from radfusion.data.hashing import sha256_file
 from radfusion.training.config import ModelConfig
+
+
+@dataclass(frozen=True)
+class PretrainedWeightIdentity:
+    """Authenticated identity of one materialized upstream encoder checkpoint."""
+
+    declared_name: str
+    stable_identifier: str
+    cache_filename: str
+    byte_size: int
+    sha256: str
+
+    def as_dict(self) -> dict[str, object]:
+        """Return serializable pretrained-weight provenance."""
+        return asdict(self)
 
 
 class StandardCxrEncoder(nn.Module):
@@ -16,13 +35,13 @@ class StandardCxrEncoder(nn.Module):
     def __init__(
         self,
         *,
-        weights: str = "densenet121-res224-chex",
+        weights: str | None = "densenet121-res224-chex",
         expected_embedding_dimension: int = 1024,
         image_size: int = 224,
     ) -> None:
         super().__init__()
-        if weights != "densenet121-res224-chex":
-            raise ValueError("Standard CXR encoder requires densenet121-res224-chex weights")
+        if weights not in {None, "densenet121-res224-chex"}:
+            raise ValueError("Standard CXR encoder received an unsupported weight identity")
         if expected_embedding_dimension != 1024 or image_size != 224:
             raise ValueError("Standard CXR encoder requires dimensions 1024 and 224")
         self.weights = weights
@@ -102,6 +121,13 @@ class ImageDenseNetModel:
 
     def build(self, config: ModelConfig) -> CxrBinaryClassifier:
         """Build an unfitted classifier without selecting a runtime device."""
+        return self._build(config, weights=str(config.parameters["weights"]))
+
+    def build_architecture(self, config: ModelConfig) -> CxrBinaryClassifier:
+        """Build the package architecture without loading upstream pretrained bytes."""
+        return self._build(config, weights=None)
+
+    def _build(self, config: ModelConfig, *, weights: str | None) -> CxrBinaryClassifier:
         if config.modality != "image" or config.registry_key != "image_densenet":
             raise ValueError("Image DenseNet requires the registered image model configuration")
         if config.fit_parameters:
@@ -125,7 +151,7 @@ class ImageDenseNetModel:
         if parameters["class_weighting"] != "train_pos_weight":
             raise ValueError("Image DenseNet requires train_pos_weight class weighting")
         encoder = self._encoder_factory(
-            weights=parameters["weights"],
+            weights=weights,
             expected_embedding_dimension=parameters["embedding_dimension"],
             image_size=parameters["image_size"],
         )
@@ -136,6 +162,31 @@ class ImageDenseNetModel:
             embedding_dimension=parameters["embedding_dimension"],
             image_size=parameters["image_size"],
         )
+
+
+def authenticate_pretrained_weights(
+    weights: str = "densenet121-res224-chex",
+) -> PretrainedWeightIdentity:
+    """Authenticate the exact local TorchXRayVision checkpoint for a declared weight name."""
+    import torchxrayvision as xrv
+
+    try:
+        stable_identifier = str(xrv.models.model_urls[weights]["weights_url"])
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"Unknown TorchXRayVision weight identity: {weights!r}") from exc
+    cache_filename = Path(urlparse(stable_identifier).path).name
+    if not cache_filename:
+        raise ValueError("TorchXRayVision weight URL does not name a cache file")
+    cache_path = Path(xrv.utils.get_cache_dir()).expanduser() / cache_filename
+    if not cache_path.is_file() or cache_path.is_symlink():
+        raise FileNotFoundError(f"Materialized pretrained weight file is missing: {cache_filename}")
+    return PretrainedWeightIdentity(
+        declared_name=weights,
+        stable_identifier=stable_identifier,
+        cache_filename=cache_filename,
+        byte_size=cache_path.stat().st_size,
+        sha256=sha256_file(cache_path),
+    )
 
 
 def _validate_images(images: object, image_size: int) -> None:

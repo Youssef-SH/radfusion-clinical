@@ -5,11 +5,12 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import lightgbm
 import mlflow
@@ -20,6 +21,9 @@ import skops
 from mlflow.tracking import MlflowClient
 
 from radfusion.data.hashing import sha256_file
+
+if TYPE_CHECKING:
+    from radfusion.training.config import ExperimentConfig
 
 DEFAULT_TRACKING_URI = "sqlite:///mlflow.db"
 MLFLOW_ARTIFACT_DIRECTORY = "mlartifacts"
@@ -94,6 +98,16 @@ def uv_lock_sha256(path: str | Path = "uv.lock") -> str:
     if not lock.is_file():
         raise FileNotFoundError(f"Dependency lock is missing: {lock}")
     return sha256_file(lock)
+
+
+def log_source_config(config: ExperimentConfig) -> None:
+    """Log the authenticated source configuration for the active MLflow run."""
+    with tempfile.TemporaryDirectory(prefix="radfusion-config-") as temporary_directory:
+        path = Path(temporary_directory) / "resolved_config.yaml"
+        path.write_bytes(config.source_bytes)
+        if sha256_file(path) != config.source_sha256:
+            raise ValueError("Loaded source configuration SHA-256 mismatch")
+        mlflow.log_artifact(str(path), artifact_path="config")
 
 
 def environment_provenance() -> dict[str, str]:
