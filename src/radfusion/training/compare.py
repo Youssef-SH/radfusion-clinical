@@ -1,4 +1,4 @@
-"""Regenerate metadata experiment comparison views from completed MLflow runs."""
+"""Regenerate experiment comparison views from completed MLflow runs."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ COMPARISON_COLUMNS = (
     "parent_training_run_id",
     "experiment_name",
     "model",
+    "modality",
+    "task",
     "model_package_id",
     "bundle_id",
     "split_assignment_id",
@@ -54,6 +56,7 @@ _COMMON_TAGS = (
     "seed",
     "evaluation_scope",
     "run_kind",
+    "task",
 )
 _PREFIXED_METRICS = (
     "average_precision",
@@ -123,7 +126,7 @@ def regenerate_comparison(
     records = [
         record
         for record in candidates
-        if record["evaluation_scope"] == "validation"
+        if (record["evaluation_scope"] == "validation" and record["modality"] == "metadata")
         or _has_matching_training_parent(record, training)
     ]
     records.sort(
@@ -142,7 +145,7 @@ def regenerate_comparison(
     _atomic_write_csv(table, csv_path)
     _atomic_write_text(
         markdown_path,
-        "# Metadata experiment comparison\n\n"
+        "# Experiment comparison\n\n"
         + ("No completed runs are available.\n" if table.empty else _markdown_table(table)),
     )
     return csv_path, markdown_path, len(table)
@@ -158,6 +161,8 @@ def _has_matching_training_parent(
         for field in (
             "experiment_name",
             "model",
+            "modality",
+            "task",
             "model_package_id",
             "bundle_id",
             "split_assignment_id",
@@ -180,17 +185,20 @@ def _comparison_record(run) -> dict[str, object] | None:
     }:
         return None
     parent = tags.get("source_training_run_id", "")
-    if kind == "test_evaluation" and (not isinstance(parent, str) or not parent.strip()):
+    if scope == "test" and (not isinstance(parent, str) or not parent.strip()):
         return None
     metrics = {name: run.data.metrics.get(f"{scope}_{name}") for name in _PREFIXED_METRICS}
     metrics["model_size_mib"] = run.data.metrics.get("model_size_mib")
-    if not _valid_metrics(metrics):
+    modality = tags.get("modality", "metadata")
+    if modality not in {"metadata", "image"} or not _valid_metrics(metrics, modality=modality):
         return None
     return {
         "run_id": run.info.run_id,
         "parent_training_run_id": parent,
         "experiment_name": tags["experiment_name"],
         "model": tags["model"],
+        "modality": modality,
+        "task": tags["task"],
         "model_package_id": tags["model_package_id"],
         "bundle_id": tags["dataset_bundle_id"],
         "split_assignment_id": tags["split_assignment_id"],
@@ -200,8 +208,10 @@ def _comparison_record(run) -> dict[str, object] | None:
     }
 
 
-def _valid_metrics(metrics: dict[str, object]) -> bool:
+def _valid_metrics(metrics: dict[str, object], *, modality: str) -> bool:
     for name, value in metrics.items():
+        if name == "latency_ms" and modality == "image" and value is None:
+            continue
         if (
             isinstance(value, bool)
             or not isinstance(value, int | float)
@@ -210,7 +220,7 @@ def _valid_metrics(metrics: dict[str, object]) -> bool:
             return False
         if name in _BOUNDED_METRICS and not 0.0 <= value <= 1.0:
             return False
-    return metrics["latency_ms"] >= 0.0 and metrics["model_size_mib"] > 0.0
+    return (modality == "image" or metrics["latency_ms"] >= 0.0) and metrics["model_size_mib"] > 0.0
 
 
 def _atomic_write_csv(table: pd.DataFrame, path: Path) -> None:

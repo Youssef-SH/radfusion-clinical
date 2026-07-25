@@ -21,6 +21,10 @@ from radfusion.evaluation.latency import benchmark_single_sample_latency_ms
 from radfusion.evaluation.metrics import evaluate_operating_point, evaluate_probabilities
 from radfusion.evaluation.probabilities import positive_class_probabilities
 from radfusion.training.config import ConfigError, ExperimentConfig, load_experiment_config
+from radfusion.training.evaluate_image import (
+    ImageTestEvaluationResult,
+    evaluate_image_training_run,
+)
 from radfusion.training.registry import RegistryError, get_dataset
 from radfusion.training.train_tabular import (
     metrics_document,
@@ -55,10 +59,12 @@ def evaluate_training_run(
     training_run_id: str,
     *,
     tracking_uri: str = DEFAULT_TRACKING_URI,
-) -> TestEvaluationResult:
+) -> TestEvaluationResult | ImageTestEvaluationResult:
     """Apply a completed training run's model and thresholds to test data."""
     client = configure_mlflow(tracking_uri=tracking_uri)
     source_run = client.get_run(training_run_id)
+    if source_run.data.tags.get("modality") == "image":
+        return evaluate_image_training_run(training_run_id, tracking_uri=tracking_uri)
     if (
         source_run.info.status != "FINISHED"
         or source_run.data.tags.get("run_kind") != "training"
