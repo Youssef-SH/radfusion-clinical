@@ -9,7 +9,8 @@ uv sync --locked
 ```
 
 Each training run records the lock-file SHA-256, Python version, operating system, CPU architecture
-and model, and versions of NumPy, PyArrow, scikit-learn, LightGBM, MLflow, and skops.
+and model, and relevant library versions. Neural runs also record PyTorch, TorchVision, and
+TorchXRayVision versions and requested and effective device policies.
 
 ## Rebuild the RSNA bundle
 
@@ -62,6 +63,7 @@ identity and acceptance rules are defined in [`data_contract.md`](data_contract.
 make rsna-audit
 make train CONFIG=configs/metadata_logistic.yaml
 make train CONFIG=configs/metadata_lightgbm.yaml
+make train CONFIG=configs/image_densenet.yaml
 make evaluate RUN_ID=<training-run-id>
 make compare
 ```
@@ -76,11 +78,34 @@ training data. Validation selects the LightGBM stopping point and both operating
 `make evaluate` verifies those choices against the source training run before applying them to
 test in a separate linked run.
 
+Image configs additionally pin the exact bundle manifest SHA-256. That pin authenticates manifest
+bytes, whose physical hashes authenticate Parquet bytes and whose logical hashes bind bundle
+identity. Training and test evaluation require matching source-inventory identities while
+authenticating only their authorized partitions.
+
 Training runs record the Git commit and dirty status, exact configuration bytes and hash,
 dependency-lock hash, environment, dataset identity, and model lineage. Formal test evaluation
 requires a package produced from the evaluator's clean Git commit and matching dependency lock.
 Test-evaluation runs record their own code and lock provenance and link the verified model package
 to its source training run.
+
+Image training authenticates only train and validation DICOMs against the bundle source inventory.
+It seeds Python, NumPy, PyTorch, DataLoader shuffling, workers, and deterministic kernels once per
+run. The selected CPU checkpoint may come from head-only warm-up or full fine-tuning. Explicit test
+evaluation verifies the package, checkpoint, code, lock, and model structure before loading test
+rows, then authenticates only test DICOMs and applies the validation thresholds unchanged. It
+reconstructs the architecture without reading or downloading the original pretrained cache.
+
+Epoch records contain the learning rates used for that epoch. CUDA runtime, cuDNN, GPU identity,
+device index, and compute capability are recorded as runtime provenance and excluded from semantic
+package identity.
+
+Neural package identity binds a canonical digest of meaning-bearing image configuration. Data,
+manifest, model, and report paths remain operational values, while the archived YAML is validated
+separately by its exact byte hash.
+
+The image config represents one independent seed. Runs for seeds 17, 42, and 2026 are executed
+separately; the repository does not rank, average, or orchestrate those runs.
 
 ## Probability and operating-point metrics
 
@@ -121,8 +146,9 @@ Latency covers the complete preprocessing and probability pipeline on CPU. It is
 the first sample in deterministic order for the evaluated partition. Results are reported in
 milliseconds and remain dependent on hardware and system load.
 
-Model size is the exact serialized `model.skops` byte count divided by 1,048,576 and reported as
-MiB.
+Model size is the exact serialized `model.skops` or `model.pt` byte count divided by 1,048,576 and
+reported as MiB. The CPU latency protocol applies to metadata pipelines; neural comparison records
+do not report that tabular latency measurement.
 
 ## Artifact lineage
 
