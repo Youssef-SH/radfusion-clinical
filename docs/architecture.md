@@ -21,17 +21,22 @@ The lifecycle is: source dataset → build execution → immutable bundle → va
 | Bundle publisher | Publish immutable bundles and update `CURRENT` atomically |
 | Audit generator | Produce aggregate dataset reports from a validated bundle |
 | Dataset mapping | Resolve the built-in adapter for a pinned bundle |
-| Model mapping | Resolve the built-in metadata estimator adapter |
-| Tabular runner | Fit on train and select operating thresholds on validation |
-| Test evaluator | Apply a completed training run to the test partition |
+| Model mapping | Resolve a built-in metadata or image model adapter |
+| Tabular runner | Fit a metadata model and select operating thresholds on validation |
+| Neural runner | Authenticate source images, train one seed, and select one validation state |
+| Test evaluator | Verify a completed package before applying it to the test partition |
 | Evaluation utilities | Compute probabilities, metrics, thresholds, latency, and plots |
 
-Dataset adapters isolate source-specific behavior. Training reads validated bundles through the
-dataset mapping. Model adapters own estimator construction and fitting.
+Dataset adapters isolate source-specific behavior. Training reads validated bundle records through
+the dataset mapping. Image consumers also authenticate permitted external DICOM bytes against the
+bundle inventory before decoding. Model adapters own estimator or neural architecture construction.
 
 The manifest owns dataset, task, split, source, and artifact lineage. Parquet tables contain
 row-level facts, while audits contain derived descriptions. `CURRENT` selects a bundle for
 interactive commands; experiment configs pin an exact bundle ID.
+
+Image configs also pin the exact manifest-file SHA-256. The manifest then authenticates Parquet
+bytes and semantic bundle identity, providing a lightweight trust chain before partition reads.
 
 Model packages under `models/` and complete reports under `reports/` are the authoritative
 physical outputs. MLflow stores the run ledger and references to those outputs; see
@@ -44,7 +49,7 @@ RSNA source files
     → dataset adapter
     → validated tables and manifest
     → immutable bundle
-    → audit, tabular training, or explicit test evaluation
+    → audit, metadata or image training, or explicit test evaluation
     → bundle-qualified audits or run-qualified experiment outputs
 ```
 

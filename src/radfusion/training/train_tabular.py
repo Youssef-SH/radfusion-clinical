@@ -15,7 +15,7 @@ os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "radfusi
 import mlflow
 import numpy as np
 
-from radfusion.data.hashing import sha256_file
+from radfusion.data.tabular_preprocess import metadata_input_contract, validate_metadata_pipeline
 from radfusion.evaluation.latency import LATENCY_SAMPLE_POLICY, benchmark_single_sample_latency_ms
 from radfusion.evaluation.metrics import (
     CALIBRATION_BINNING_STRATEGY,
@@ -35,10 +35,11 @@ from radfusion.utils.mlflow_utils import (
     configure_mlflow,
     environment_provenance,
     git_revision,
+    log_source_config,
     tracked_run,
     uv_lock_sha256,
 )
-from radfusion.utils.model_publication import publish_model_run
+from radfusion.utils.model_publication import publish_model_run, threshold_contract
 from radfusion.utils.privacy import validate_public_reports
 from radfusion.utils.publication import publish_directory, staging_directory
 from radfusion.utils.skops_io import load_skops, save_skops
@@ -69,6 +70,7 @@ class ModelResult:
     thresholds: dict[str, float]
     model_path: Path
     model_sha256: str
+    model_package_id: str
     artifact_directory: Path
     latency_ms: float
     model_size_mib: float
@@ -116,7 +118,7 @@ def train_configured_experiment(
         tags=base_tags,
         parameters=base_parameters,
     ) as run_id:
-        _log_source_config(config)
+        log_source_config(config)
         dataset = get_dataset(config.dataset.registry_key).load_train_validation(config.dataset)
         mlflow.set_tags(
             {
@@ -202,6 +204,7 @@ def train_configured_experiment(
             )
             serialized = save_skops(model_fit.pipeline, temporary_model_root / "model.skops")
             restored = load_skops(serialized)
+            validate_metadata_pipeline(restored)
             restored_probabilities = positive_class_probabilities(
                 restored,
                 dataset.validation.features,
@@ -235,12 +238,18 @@ def train_configured_experiment(
                     "split_assignment_id": dataset.lineage.split_assignment_id,
                     "task": dataset.lineage.task_id,
                     "positive_class": 1,
+                    "model": config.model.registry_key,
                     "source_config_sha256": config.source_sha256,
                     "seed": config.training.seed,
                     "git_commit": commit,
+                    "git_dirty": dirty,
                     "dependency_lock_sha256": lock_hash,
                     "best_iteration": best_iteration,
                     "thresholds": thresholds,
+                    "threshold_contract": threshold_contract(
+                        sensitivity_target=config.evaluation.sensitivity_target,
+                    ),
+                    "input_contract": metadata_input_contract(),
                 },
             )
             publish_directory(report_stage, report_directory)
@@ -248,6 +257,7 @@ def train_configured_experiment(
                 {
                     "local_model_path": published.model_path.as_posix(),
                     "local_model_sha256": published.model_sha256,
+                    "model_package_id": published.model_package_id,
                     "report_directory": report_directory.as_posix(),
                 }
             )
@@ -266,6 +276,7 @@ def train_configured_experiment(
         thresholds=thresholds,
         model_path=published.model_path,
         model_sha256=published.model_sha256,
+        model_package_id=published.model_package_id,
         artifact_directory=report_directory,
         latency_ms=latency_ms,
         model_size_mib=published.model_size_mib,
@@ -349,7 +360,7 @@ def mlflow_metrics(
     *,
     scope: str,
     document: dict[str, Any],
-    latency_ms: float,
+    latency_ms: float | None,
     model_size_mib: float,
 ) -> dict[str, float]:
     """Flatten one aggregate document into stable MLflow metric names."""
@@ -361,7 +372,8 @@ def mlflow_metrics(
         metrics.update(
             {f"{scope}_{policy}_{key}": float(value) for key, value in values["metrics"].items()}
         )
-    metrics[f"{scope}_latency_ms"] = latency_ms
+    if latency_ms is not None:
+        metrics[f"{scope}_latency_ms"] = latency_ms
     metrics["model_size_mib"] = model_size_mib
     return metrics
 
@@ -399,6 +411,34 @@ def _write_evaluation_report(path: Path, model_name: str, document: dict[str, An
                 f"{metrics['specificity']:.6f} | {metrics['f1']:.6f} |",
             ]
         )
+    if image_run := document.get("image_run"):
+        selection = image_run["selection"]
+        authentication = image_run["source_authentication"]
+        lines.extend(
+            [
+                "",
+                "## Neural training summary",
+                "",
+                f"- Selected state: {selection['selected_stage']} epoch "
+                f"{selection['selected_epoch']}",
+                f"- Authenticated train/validation files: {authentication['file_count']}",
+                "- Test data were not loaded, decoded, authenticated, or evaluated.",
+            ]
+        )
+    if image_evaluation := document.get("image_evaluation"):
+        counts = image_evaluation["test_counts"]
+        lines.extend(
+            [
+                "",
+                "## Verified neural test evaluation",
+                "",
+                f"- Test samples: {counts['sample_count']}",
+                f"- Positive samples: {counts['positive_count']}",
+                f"- Negative samples: {counts['negative_count']}",
+                "- Package and checkpoint verification completed before test access.",
+                "- Operating points were frozen on validation.",
+            ]
+        )
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -427,12 +467,3 @@ def _write_confusion_summary(path: Path, document: dict[str, Any]) -> None:
 def _best_iteration(parameters: Any) -> int | None:
     value = parameters.get("best_iteration")
     return int(value) if value is not None and int(value) > 0 else None
-
-
-def _log_source_config(config: ExperimentConfig) -> None:
-    with tempfile.TemporaryDirectory(prefix="radfusion-config-") as temporary_directory:
-        path = Path(temporary_directory) / "resolved_config.yaml"
-        path.write_bytes(config.source_bytes)
-        if sha256_file(path) != config.source_sha256:
-            raise ValueError("Loaded source configuration SHA-256 mismatch")
-        mlflow.log_artifact(str(path), artifact_path="config")

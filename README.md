@@ -2,7 +2,7 @@
 
 RadFusion-Clinical is a reproducible machine-learning benchmark and experimentation framework for
 radiographic pneumonia prediction, centered on the RSNA Pneumonia Detection Challenge. It provides
-deterministic data preparation, patient-disjoint evaluation, and reproducible metadata-based
+deterministic data preparation, patient-disjoint evaluation, and reproducible metadata and image
 baselines.
 
 > This is a research and educational prototype. It is not a medical device and must not be used for clinical decision-making.
@@ -16,8 +16,11 @@ baselines.
 - Content-addressed immutable bundles with exact schemas and integrity validation
 - Metadata preprocessing fitted on the training split and fixed Logistic Regression and LightGBM
   baselines
+- A TorchXRayVision DenseNet121 image baseline with deterministic single-seed training
+- Partition-scoped authentication of external DICOM bytes before image access
+- Config-pinned bundle metadata authentication for image experiments
 - Separate validation and explicit test-evaluation runs with MLflow lineage
-- Compact run-qualified model packages with exact config and model bytes
+- Immutable run-qualified metadata and neural model packages
 - Ruff, pytest, pre-commit, and continuous-integration checks
 
 ## Setup
@@ -43,9 +46,11 @@ make rsna-manifest   # publish an RSNA bundle
 make rsna-audit      # generate reports under reports/rsna/audit/<bundle-id>
 make train CONFIG=configs/metadata_logistic.yaml
 make train CONFIG=configs/metadata_lightgbm.yaml
+make train CONFIG=configs/image_densenet.yaml
 make evaluate RUN_ID=<training-run-id>
 make compare         # regenerate CSV and Markdown comparison views from MLflow
-make clean           # remove reproducible outputs while preserving raw datasets
+make clean           # remove caches and interrupted-publication staging state
+make purge-generated # deliberately remove all reproducible generated outputs
 make check           # lock consistency, Ruff checks, and unit/contract tests
 make pre-commit      # run repository hooks against all tracked files
 make inspect FILE=path/to/image.dcm
@@ -58,11 +63,16 @@ training-configuration artifacts under `mlartifacts/`.
 Every executable experiment is declared by a validated YAML file under `configs/`. See
 [`docs/training.md`](docs/training.md) for the training workflow.
 
+Image training executes one configured seed per invocation. It reads and authenticates only train
+and validation DICOMs. `make evaluate` verifies the selected immutable package before accessing
+test data and reconstructs the model without the upstream pretrained-weight cache.
+
 ## Cleaning generated artifacts
 
-Run `make clean` to remove generated reports, models, MLflow database and artifacts, Python
-caches, and bundles. Git ignores these outputs, and the pipeline regenerates them from source
-data. Raw source datasets remain under `data/raw/`.
+Run `make clean` for disposable caches and temporary publication state. It preserves completed
+bundles, reports, model packages, and experiment history. Run `make purge-generated` to remove
+those reproducible outputs deliberately. Both commands preserve raw source datasets under
+`data/raw/`.
 
 ## Repository layout
 
@@ -85,7 +95,9 @@ version control. See [`docs/privacy.md`](docs/privacy.md).
 
 ## Limitations
 
-- Implemented scope covers the labeled RSNA Stage 2 training set and metadata-only baselines.
+- Implemented scope covers the labeled RSNA Stage 2 training set and metadata and image baselines.
+- Image experiment code is complete; scientific image results require independent GPU runs and are
+  not reported here.
 - The labels are derived from public radiology-labeling pipelines and are not equivalent to
   confirmed clinical diagnosis.
 

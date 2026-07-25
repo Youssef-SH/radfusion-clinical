@@ -108,3 +108,18 @@ def test_metadata_features_reject_unapproved_columns() -> None:
 
     with np.testing.assert_raises_regex(ValueError, "unexpected columns"):
         RsnaMetadataFeatures().fit_transform(frame)
+
+
+def test_metadata_features_reject_reordered_and_duplicate_columns() -> None:
+    frame = pd.DataFrame(
+        [[50.0, False, "F", "PA", 0.1, 0.1]],
+        columns=SOURCE_FEATURES,
+    )
+    reordered = frame.loc[:, tuple(reversed(SOURCE_FEATURES))]
+    duplicate = frame.copy()
+    duplicate.columns = (*SOURCE_FEATURES[:-1], SOURCE_FEATURES[0])
+
+    with np.testing.assert_raises_regex(ValueError, "required order"):
+        RsnaMetadataFeatures().fit_transform(reordered)
+    with np.testing.assert_raises_regex(ValueError, "duplicate"):
+        RsnaMetadataFeatures().fit_transform(duplicate)

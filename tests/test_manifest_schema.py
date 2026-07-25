@@ -30,6 +30,7 @@ from radfusion.data.rsna_artifacts import (
     build_rsna_artifacts,
     load_current_bundle,
     validate_bundle_directory,
+    validate_bundle_reference,
     write_bundle,
 )
 from radfusion.data.rsna_audit import REPORT_FILENAMES, generate_rsna_audit
@@ -785,6 +786,79 @@ def test_consumer_rejects_bundle_with_hash_mismatch(tmp_path: Path) -> None:
 
     with pytest.raises(ManifestBuildError, match="hash mismatch"):
         load_current_bundle(tmp_path / "manifests")
+
+
+def test_bundle_reference_validation_does_not_materialize_parquet_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, result = _tables(tmp_path)
+    written = write_bundle(result, tmp_path / "manifests")
+
+    monkeypatch.setattr(
+        "radfusion.data.rsna_artifacts.pq.read_table",
+        lambda *args, **kwargs: pytest.fail((args, kwargs, "row materialization")),
+    )
+
+    metadata = validate_bundle_reference(
+        written.paths.bundle_directory,
+        expected_bundle_id=written.paths.bundle_id,
+        expected_metadata_sha256=sha256_file(written.paths.metadata_path),
+    )
+    assert metadata["bundle"]["bundle_id"] == written.paths.bundle_id
+
+
+def test_bundle_reference_pin_rejects_manifest_and_coordinated_artifact_tampering(
+    tmp_path: Path,
+) -> None:
+    _, result = _tables(tmp_path)
+    written = write_bundle(result, tmp_path / "manifests")
+    metadata_pin = sha256_file(written.paths.metadata_path)
+
+    table = pq.read_table(written.paths.labels_path)
+    pq.write_table(table, written.paths.labels_path, compression=None)
+    metadata = json.loads(written.paths.metadata_path.read_text(encoding="utf-8"))
+    metadata["generated_artifact_hashes"][LABELS_FILENAME]["file_sha256"] = sha256_file(
+        written.paths.labels_path
+    )
+    written.paths.metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ManifestBuildError, match="metadata SHA-256"):
+        validate_bundle_reference(
+            written.paths.bundle_directory,
+            expected_bundle_id=written.paths.bundle_id,
+            expected_metadata_sha256=metadata_pin,
+        )
+
+
+def test_bundle_reference_pin_rejects_artifact_only_and_metadata_only_tampering(
+    tmp_path: Path,
+) -> None:
+    _, result = _tables(tmp_path)
+    artifact = write_bundle(result, tmp_path / "artifact")
+    artifact_pin = sha256_file(artifact.paths.metadata_path)
+    artifact.paths.labels_path.write_bytes(b"tampered")
+    with pytest.raises(ManifestBuildError, match="File hash mismatch"):
+        validate_bundle_reference(
+            artifact.paths.bundle_directory,
+            expected_bundle_id=artifact.paths.bundle_id,
+            expected_metadata_sha256=artifact_pin,
+        )
+
+    manifest = write_bundle(result, tmp_path / "manifest")
+    manifest_pin = sha256_file(manifest.paths.metadata_path)
+    document = json.loads(manifest.paths.metadata_path.read_text(encoding="utf-8"))
+    document["source_file_hashes"][next(iter(document["source_file_hashes"]))] = "a" * 64
+    manifest.paths.metadata_path.write_text(
+        json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(ManifestBuildError, match="metadata SHA-256"):
+        validate_bundle_reference(
+            manifest.paths.bundle_directory,
+            expected_bundle_id=manifest.paths.bundle_id,
+            expected_metadata_sha256=manifest_pin,
+        )
 
 
 def test_consumer_rejects_declared_artifact_hash_tampering(tmp_path: Path) -> None:

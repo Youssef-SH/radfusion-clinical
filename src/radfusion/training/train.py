@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from radfusion.training.config import ConfigError, load_experiment_config
 from radfusion.training.registry import RegistryError
+from radfusion.training.train_image import train_image_experiment
 from radfusion.training.train_tabular import train_configured_experiment
 from radfusion.utils.mlflow_utils import DEFAULT_TRACKING_URI
 
@@ -33,7 +34,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         config = load_experiment_config(args.config)
-        result = train_configured_experiment(config, tracking_uri=args.tracking_uri)
+        if not config.executable:
+            raise ConfigError("This experiment configuration is not executable yet")
+        result = (
+            train_image_experiment(config, tracking_uri=args.tracking_uri)
+            if config.model.modality == "image"
+            else train_configured_experiment(config, tracking_uri=args.tracking_uri)
+        )
     except (
         ConfigError,
         RegistryError,

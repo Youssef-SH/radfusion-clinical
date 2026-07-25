@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -38,6 +39,31 @@ SOURCE_FEATURES = (
     "pixel_spacing_row_mm",
     "pixel_spacing_col_mm",
 )
+METADATA_INPUT_POLICY_VERSION = "rsna-metadata-input-v1"
+_SOURCE_FEATURE_CONTRACT = {
+    "age_years": ("numeric", "allowed"),
+    "age_is_implausible": ("boolean", "forbidden"),
+    "sex": ("categorical_string", "allowed"),
+    "view_position": ("categorical_string", "allowed"),
+    "pixel_spacing_row_mm": ("numeric", "allowed"),
+    "pixel_spacing_col_mm": ("numeric", "allowed"),
+}
+
+
+def metadata_input_contract() -> dict[str, Any]:
+    """Return the exact raw-input contract for serialized metadata pipelines."""
+    return {
+        "policy_version": METADATA_INPUT_POLICY_VERSION,
+        "features": [
+            {
+                "name": name,
+                "type_category": _SOURCE_FEATURE_CONTRACT[name][0],
+                "missing_values": _SOURCE_FEATURE_CONTRACT[name][1],
+            }
+            for name in SOURCE_FEATURES
+        ],
+        "fitted_preprocessing_embedded": True,
+    }
 
 
 class RsnaMetadataFeatures(BaseEstimator, TransformerMixin):
@@ -46,6 +72,7 @@ class RsnaMetadataFeatures(BaseEstimator, TransformerMixin):
     def fit(self, features: pd.DataFrame, target: object = None) -> RsnaMetadataFeatures:
         """Validate the input columns."""
         self._validate_columns(features)
+        self.feature_names_in_ = np.asarray(SOURCE_FEATURES, dtype=object)
         return self
 
     def transform(self, features: pd.DataFrame) -> pd.DataFrame:
@@ -69,12 +96,32 @@ class RsnaMetadataFeatures(BaseEstimator, TransformerMixin):
     def _validate_columns(features: pd.DataFrame) -> None:
         if not isinstance(features, pd.DataFrame):
             raise TypeError("RSNA metadata preprocessing requires a pandas DataFrame")
+        if len(features.columns) != len(set(features.columns)):
+            raise ValueError("RSNA metadata contains duplicate columns")
         missing = sorted(set(SOURCE_FEATURES) - set(features.columns))
         if missing:
             raise ValueError(f"RSNA metadata is missing required columns: {missing}")
         unexpected = sorted(set(features.columns) - set(SOURCE_FEATURES))
         if unexpected:
             raise ValueError(f"RSNA metadata contains unexpected columns: {unexpected}")
+        if tuple(features.columns) != SOURCE_FEATURES:
+            raise ValueError("RSNA metadata columns are not in the required order")
+
+
+def validate_metadata_pipeline(model: object) -> Pipeline:
+    """Validate that a loaded estimator embeds the fitted metadata input pipeline."""
+    if not isinstance(model, Pipeline):
+        raise ValueError("Serialized metadata model must be a scikit-learn pipeline")
+    preprocessor = model.named_steps.get("preprocess")
+    if not isinstance(preprocessor, Pipeline):
+        raise ValueError("Serialized metadata model is missing its preprocessing pipeline")
+    metadata = preprocessor.named_steps.get("metadata")
+    if not isinstance(metadata, RsnaMetadataFeatures):
+        raise ValueError("Serialized metadata model has an invalid feature transformer")
+    fitted_names = getattr(metadata, "feature_names_in_", None)
+    if fitted_names is None or tuple(fitted_names.tolist()) != SOURCE_FEATURES:
+        raise ValueError("Serialized metadata model has an invalid fitted input contract")
+    return model
 
 
 def build_rsna_preprocessor() -> Pipeline:

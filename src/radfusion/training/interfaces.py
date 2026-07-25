@@ -10,6 +10,7 @@ from typing import Any, Protocol
 import numpy as np
 import pandas as pd
 from sklearn.pipeline import Pipeline
+from torch import nn
 
 from radfusion.training.config import DatasetConfig, ModelConfig
 
@@ -71,6 +72,12 @@ class DatasetImplementation(Protocol):
     def load_test(self, config: DatasetConfig) -> tuple[DatasetPartition, DatasetLineage]:
         """Load only the test partition and its pinned lineage."""
 
+    def load_image_train_validation(self, config: DatasetConfig) -> Any:
+        """Load and authenticate image train and validation rows."""
+
+    def load_image_test(self, config: DatasetConfig) -> Any:
+        """Load and authenticate image test rows."""
+
 
 class ModelImplementation(Protocol):
     """Registered model implementation used by the experiment runner."""
@@ -85,3 +92,10 @@ class ModelImplementation(Protocol):
         validation_targets: np.ndarray,
     ) -> ModelFitResult:
         """Fit one model from training data with validation monitoring."""
+
+
+class ImageModelImplementation(Protocol):
+    """Registered image model builder used by the neural runner."""
+
+    def build(self, config: ModelConfig) -> nn.Module:
+        """Build an unfitted image model."""

@@ -1,4 +1,4 @@
-# Metadata experiments
+# Experiments
 
 Each executable experiment is defined by one strict YAML file:
 
@@ -10,6 +10,7 @@ dataset:
   registry_key: rsna
   manifest_directory: data/manifests
   bundle_id: build-<sha256>
+  bundle_metadata_sha256: <sha256>  # required for image experiments
   task_id: pneumonia
 
 model:
@@ -35,8 +36,8 @@ mlflow:
 The loader rejects missing, unknown, and duplicate keys. Each experiment names an exact immutable
 bundle ID. `training.seed` is the single randomness authority.
 
-The executable configs are `configs/metadata_logistic.yaml` and
-`configs/metadata_lightgbm.yaml`.
+The executable configs are `configs/metadata_logistic.yaml`,
+`configs/metadata_lightgbm.yaml`, and `configs/image_densenet.yaml`.
 
 ## Feature boundary
 
@@ -52,11 +53,15 @@ The RSNA adapter exposes these model features:
 Preprocessing rejects additional columns. Sample IDs, patient IDs, image paths, targets,
 partitions, and lineage remain separate from the feature frame. Imputation, categories,
 missingness indicators, scaling, and class weighting are derived from training data.
+The model package records this ordered input contract, its type categories and missing-value
+semantics, and the policy version. The fitted preprocessing pipeline is embedded in
+`model.skops`.
 
 ## Execution
 
 ```bash
 make train CONFIG=configs/metadata_logistic.yaml
+make train CONFIG=configs/image_densenet.yaml
 make evaluate RUN_ID=<training-run-id>
 make compare
 ```
@@ -68,12 +73,54 @@ train and validation only. It fits preprocessing and the estimator on train, use
 LightGBM early stopping, selects both operating thresholds on validation, and publishes the fitted
 model.
 
-Test evaluation is a separate run. Before reading test data, it cross-checks the package,
-configuration, model bytes, pinned bundle, source-run tags, validation-derived thresholds, and
-LightGBM best iteration. It then reads only test and applies the verified choices unchanged.
+Test evaluation is a separate run. Before reading test data, it validates the package and its
+semantic ID, source-run lineage, configuration and model hashes, fitted input contract,
+validation-derived choices, and LightGBM best iteration. Formal evaluation accepts packages from
+clean training commits and requires the evaluator to use the same clean Git commit and
+dependency lock. It then reads only test and applies the verified choices unchanged.
 
 The built-in dataset and model adapters are held in immutable mappings. One tabular runner owns
-training; the explicit evaluator owns test evaluation.
+metadata training, one neural runner owns image training, and the explicit evaluator owns test
+evaluation. Dispatch is determined by `model.modality`.
+
+## Image training
+
+The image configuration defines one seed, the fixed TorchXRayVision DenseNet121 encoder, source
+dataset root, deterministic loading policy, augmentation, optimization stages, and runtime policy.
+Each invocation trains one seed. Training validates the pinned bundle, loads only train and
+validation rows, and authenticates their DICOM size and SHA-256 against the source inventory before
+constructing datasets or the model.
+
+The config-pinned manifest hash authenticates the exact bundle metadata bytes before their
+artifact declarations are trusted. Training and test evaluation also require the same source
+inventory file and logical identities; their authorized row digests differ by partition.
+
+Training performs head-only warm-up followed by full fine-tuning. Validation Average Precision
+selects the retained state across both stages and controls fine-tuning scheduling and early
+stopping. Final deterministic validation inference freezes the Youden-J and target-sensitivity
+thresholds. Test rows, labels, files, and pixels remain outside the training lifecycle.
+Epoch history records the learning rates used during each epoch, before scheduling the next epoch.
+
+Runtime selection supports CPU and CUDA. Mixed precision and pinned-memory transfer become
+effective only on CUDA when requested. DataLoader shuffle, worker randomness, model initialization,
+and augmentation derive from `training.seed`. CUDA runtime, cuDNN, GPU device, and compute
+capability are recorded as non-semantic runtime provenance.
+
+Image packages contain:
+
+```text
+models/rsna/runs/<training-run-id>/
+  model.pt
+  resolved_config.yaml
+  model_manifest.json
+```
+
+`model.pt` is a validated CPU tensor state dictionary with selection metadata. The package manifest
+binds the checkpoint, path-independent experiment meaning, archived configuration, dataset and
+split lineage, source authentication, pretrained weights, transform contracts, training policy,
+selected validation state, and frozen thresholds. The evaluator validates this package,
+reconstructs the DenseNet architecture without loading the original TorchXRayVision cache, and
+strictly loads the complete state before reading or authenticating test data.
 
 ## Tracking and outputs
 
@@ -101,8 +148,17 @@ models/rsna/runs/<training-run-id>/
   model_manifest.json
 ```
 
-The manifest records the model hash, training run, pinned bundle and split assignment, task,
-positive class, config hash, seed, Git commit, dependency lock, best iteration, and thresholds.
+Image packages use the same hierarchy with `model.pt` in place of `model.skops`.
+
+The manifest records `model_package_schema_version` and a deterministic `model_package_id` over
+the model, path-independent experiment meaning, bundle and split assignment, task,
+model family, seed, Git and dependency state, validation selection, thresholds, and input contract.
+Operational paths are outside this identity; the archived configuration retains exact byte-hash
+validation.
+
+Dirty training runs may publish traceable packages, but those packages are ineligible for formal
+test evaluation. Test-evaluation runs record their own Git and dependency provenance, the model
+package ID, and their source training run.
 
 Each training or test-evaluation run publishes aggregate reports under
 `reports/rsna/runs/<run-id>/`:
@@ -120,7 +176,8 @@ confusion_matrix_target_sensitivity.png
 
 Publication requires exactly this set after privacy validation. `make compare` deterministically
 regenerates `reports/model_comparison_table.csv` and `.md` from complete, finite MLflow records.
-Failed, unfinished, and incomplete runs are excluded.
+Rows include modality, task, and model package identity. Image rows are published only for verified
+test-evaluation runs; failed, unfinished, and incomplete runs are excluded.
 
 The training, evaluation, and comparison CLIs default to `sqlite:///mlflow.db` and accept
 `--tracking-uri` when an isolated local SQLite database is required.

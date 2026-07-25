@@ -25,6 +25,7 @@ def _run(
     parent_training_run_id: str | None = None,
     metric_override: tuple[str, float] | None = None,
     tag_override: tuple[str, str] | None = None,
+    modality: str = "metadata",
 ) -> str:
     kind = "training" if scope == "validation" else "test_evaluation"
     parent = (
@@ -38,6 +39,9 @@ def _run(
         "evaluation_scope": scope,
         "experiment_name": "experiment",
         "model": "metadata_logistic",
+        "modality": modality,
+        "task": "pneumonia",
+        "model_package_id": "model-package-test",
         "dataset_bundle_id": "bundle",
         "split_assignment_id": "assignment",
         "seed": "42",
@@ -77,6 +81,22 @@ def _run(
     return run_id
 
 
+def test_image_comparison_uses_canonical_test_evaluation_run_kind(tmp_path: Path) -> None:
+    tracking_uri = _tracking_uri(tmp_path)
+    configure_mlflow(experiment_name="comparison-test", tracking_uri=tracking_uri)
+    training_id = _run(scope="validation", modality="image")
+    test_id = _run(scope="test", parent_training_run_id=training_id, modality="image")
+
+    csv_path, _, count = regenerate_comparison(
+        tracking_uri=tracking_uri,
+        output_directory=tmp_path / "reports",
+    )
+    table = pd.read_csv(csv_path)
+
+    assert count == 1
+    assert table["run_id"].tolist() == [test_id]
+
+
 def test_comparison_is_regenerated_from_complete_mlflow_runs(tmp_path: Path) -> None:
     tracking_uri = _tracking_uri(tmp_path)
     configure_mlflow(experiment_name="comparison-test", tracking_uri=tracking_uri)
@@ -93,7 +113,8 @@ def test_comparison_is_regenerated_from_complete_mlflow_runs(tmp_path: Path) -> 
     assert list(table.columns) == list(COMPARISON_COLUMNS)
     assert set(table["run_id"]) == {validation_id, test_id}
     assert table.loc[table["run_id"] == test_id, "parent_training_run_id"].iloc[0] == validation_id
-    assert "Metadata experiment comparison" in markdown_path.read_text(encoding="utf-8")
+    assert set(table["model_package_id"]) == {"model-package-test"}
+    assert "Experiment comparison" in markdown_path.read_text(encoding="utf-8")
 
 
 def test_comparison_excludes_failed_and_incomplete_runs(tmp_path: Path) -> None:

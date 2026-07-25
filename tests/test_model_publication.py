@@ -9,9 +9,13 @@ import pandas as pd
 import pytest
 from sklearn.linear_model import LogisticRegression
 
+from radfusion.data.tabular_preprocess import metadata_input_contract
 from radfusion.utils.model_publication import (
+    MODEL_PACKAGE_ID_PREFIX,
     REQUIRED_MANIFEST_FIELDS,
+    model_package_id,
     publish_model_run,
+    threshold_contract,
     validate_published_model,
 )
 from radfusion.utils.skops_io import load_skops, save_skops
@@ -25,12 +29,16 @@ def _manifest() -> dict[str, object]:
         "split_assignment_id": "assignment-test",
         "task": "pneumonia",
         "positive_class": 1,
+        "model": "metadata_logistic",
         "source_config_sha256": _SHA256,
         "seed": 42,
         "git_commit": "commit-test",
+        "git_dirty": False,
         "dependency_lock_sha256": _SHA256,
         "best_iteration": None,
         "thresholds": {"youden_j": 0.5, "target_sensitivity": 0.3},
+        "threshold_contract": threshold_contract(sensitivity_target=0.9),
+        "input_contract": metadata_input_contract(),
     }
 
 
@@ -65,6 +73,8 @@ def test_model_package_is_compact_run_qualified_and_loadable(tmp_path: Path) -> 
     }
     document = validate_published_model(published.run_directory)
     assert set(document) == REQUIRED_MANIFEST_FIELDS
+    assert document["model_package_id"].startswith(MODEL_PACKAGE_ID_PREFIX)
+    assert document["model_package_id"] == model_package_id(document)
     np.testing.assert_array_equal(
         load_skops(published.model_path).predict_proba(features),
         model.predict_proba(features),
@@ -77,12 +87,100 @@ def test_model_package_preserves_exact_serialized_and_config_bytes(tmp_path: Pat
     assert published.config_path.read_bytes() == (tmp_path / "source.yaml").read_bytes()
 
 
+def test_model_package_id_is_deterministic_and_changes_with_semantic_content(
+    tmp_path: Path,
+) -> None:
+    _, _, published = _publish(tmp_path)
+    document = validate_published_model(published.run_directory)
+
+    assert model_package_id(document) == model_package_id(dict(reversed(document.items())))
+    changed = {**document, "seed": document["seed"] + 1}
+    changed.pop("model_package_id")
+    assert model_package_id(changed) != document["model_package_id"]
+
+
 def test_model_manifest_tampering_is_rejected(tmp_path: Path) -> None:
     _, _, published = _publish(tmp_path)
     document = json.loads(published.manifest_path.read_text(encoding="utf-8"))
     document["model_sha256"] = "tampered"
     published.manifest_path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(ValueError, match="SHA-256"):
+        validate_published_model(published.run_directory)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing", "reordered", "malformed"],
+)
+def test_model_manifest_rejects_invalid_input_contract(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    _, _, published = _publish(tmp_path)
+    document = json.loads(published.manifest_path.read_text(encoding="utf-8"))
+    contract = document["input_contract"]
+    features = contract["features"]
+    if mutation == "missing":
+        features.pop()
+    elif mutation == "reordered":
+        features[0], features[1] = features[1], features[0]
+    else:
+        contract["fitted_preprocessing_embedded"] = "yes"
+    document["model_package_id"] = model_package_id(document)
+    published.manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="input contract"):
+        validate_published_model(published.run_directory)
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("model_package_schema_version", "schema version"),
+        ("positive_class", "positive class"),
+    ],
+)
+def test_model_manifest_rejects_boolean_integer_fields(
+    tmp_path: Path,
+    field: str,
+    message: str,
+) -> None:
+    _, _, published = _publish(tmp_path)
+    document = json.loads(published.manifest_path.read_text(encoding="utf-8"))
+    document[field] = True
+    document["model_package_id"] = model_package_id(document)
+    published.manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        validate_published_model(published.run_directory)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("youden_j_policy_version", "unknown", "Youden-J threshold policy"),
+        (
+            "target_sensitivity_policy_version",
+            "unknown",
+            "target-sensitivity threshold policy",
+        ),
+        ("sensitivity_target", True, "sensitivity target"),
+        ("positive_class", True, "threshold positive class"),
+    ],
+)
+def test_model_manifest_rejects_invalid_threshold_contract(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    _, _, published = _publish(tmp_path)
+    document = json.loads(published.manifest_path.read_text(encoding="utf-8"))
+    document["threshold_contract"][field] = value
+    document["model_package_id"] = model_package_id(document)
+    published.manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
         validate_published_model(published.run_directory)
 
 
