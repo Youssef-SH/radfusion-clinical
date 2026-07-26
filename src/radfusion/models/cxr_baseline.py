@@ -50,6 +50,7 @@ class StandardCxrEncoder(nn.Module):
         import torchxrayvision as xrv
 
         self.backbone = xrv.models.DenseNet(weights=weights)
+        self.backbone.op_threshs = None
 
     def encode(self, images: torch.Tensor) -> torch.Tensor:
         """Return one 1024-dimensional pooled embedding per image."""
