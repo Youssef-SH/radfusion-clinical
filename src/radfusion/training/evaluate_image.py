@@ -78,7 +78,6 @@ def evaluate_image_training_run(
         "experiment_name": experiment_name,
         "dataset": source_run.data.tags.get("dataset", ""),
         "dataset_bundle_id": source_run.data.tags.get("dataset_bundle_id", ""),
-        "bundle_metadata_sha256": source_run.data.tags.get("bundle_metadata_sha256", ""),
         "task": source_run.data.tags.get("task", ""),
         "modality": "image",
         "model": source_run.data.tags.get("model", ""),
@@ -124,14 +123,17 @@ def evaluate_image_training_run(
             raise TypeError("Registered image model builder must return torch.nn.Module")
         strict_load_checkpoint(model, checkpoint)
         dataset_adapter = get_dataset(config.dataset.registry_key)
-        image_data = dataset_adapter.load_image_test(config.dataset)
+        image_data = dataset_adapter.load_image_test(
+            config.dataset,
+            expected_manifest_sha256=manifest["bundle_manifest_sha256"],
+        )
         authentication = image_data.authentication
         if (
             image_data.lineage.bundle_id != manifest["bundle_id"]
             or image_data.lineage.split_assignment_id != manifest["split_assignment_id"]
             or image_data.lineage.task_id != manifest["task"]
             or image_data.lineage.label_policy_version != manifest["label_policy_version"]
-            or image_data.bundle_metadata_sha256 != manifest["bundle_metadata_sha256"]
+            or image_data.bundle_manifest_sha256 != manifest["bundle_manifest_sha256"]
         ):
             raise ValueError("Test bundle lineage differs from the neural package")
         _verify_source_authentication(image_data.authentication.as_dict(), manifest)
@@ -197,7 +199,7 @@ def evaluate_image_training_run(
             "model_package_id": manifest["model_package_id"],
             "checkpoint_sha256": manifest["checkpoint_sha256"],
             "bundle_id": manifest["bundle_id"],
-            "bundle_metadata_sha256": manifest["bundle_metadata_sha256"],
+            "bundle_manifest_sha256": manifest["bundle_manifest_sha256"],
             "split_assignment_id": manifest["split_assignment_id"],
             "task": manifest["task"],
             "label_policy_version": manifest["label_policy_version"],
@@ -247,7 +249,7 @@ def evaluate_image_training_run(
             )
             mlflow.log_params(
                 {
-                    "bundle_metadata_sha256": image_data.bundle_metadata_sha256,
+                    "bundle_manifest_sha256": image_data.bundle_manifest_sha256,
                     "source_inventory_file_sha256": authentication.source_inventory_file_sha256,
                     "source_inventory_arrow_sha256": authentication.source_inventory_arrow_sha256,
                     "source_authentication_policy_version": authentication.policy_version,
@@ -315,7 +317,6 @@ def _verify_package_lineage(
         "bundle_id": config.dataset.bundle_id,
         "task": config.dataset.task_id,
         "model": config.model.registry_key,
-        "bundle_metadata_sha256": config.dataset.bundle_metadata_sha256,
     }
     for field, expected in checks.items():
         if manifest[field] != expected:
@@ -333,11 +334,12 @@ def _verify_package_lineage(
         "semantic_config_sha256": manifest["semantic_config_sha256"],
         "local_model_sha256": manifest["checkpoint_sha256"],
         "model_package_id": manifest["model_package_id"],
-        "bundle_metadata_sha256": manifest["bundle_metadata_sha256"],
     }
     for field, expected in expected_tags.items():
         if source_run.data.tags.get(field) != expected:
             raise ValueError(f"Image training run tag {field} mismatch")
+    if source_run.data.params.get("bundle_manifest_sha256") != manifest["bundle_manifest_sha256"]:
+        raise ValueError("Image training run parameter bundle_manifest_sha256 mismatch")
     for policy in ("youden_j", "target_sensitivity"):
         observed = source_run.data.metrics.get(f"validation_{policy}_threshold")
         expected = manifest["thresholds"][policy]

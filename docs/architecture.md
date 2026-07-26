@@ -35,8 +35,10 @@ The manifest owns dataset, task, split, source, and artifact lineage. Parquet ta
 row-level facts, while audits contain derived descriptions. `CURRENT` selects a bundle for
 interactive commands; experiment configs pin an exact bundle ID.
 
-Image configs also pin the exact manifest-file SHA-256. The manifest then authenticates Parquet
-bytes and semantic bundle identity, providing a lightweight trust chain before partition reads.
+Image configs pin the semantic bundle ID. Validation computes the observed bundle-manifest SHA-256
+and verifies its physical, logical, semantic, split, and source contracts before partition reads.
+Training freezes that exact identity in the package; linked evaluation requires the same
+bundle-manifest SHA-256 before test access.
 
 Model packages under `models/` and complete reports under `reports/` are the authoritative
 physical outputs. MLflow stores the run ledger and references to those outputs; see

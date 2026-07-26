@@ -18,7 +18,7 @@ baselines.
   baselines
 - A TorchXRayVision DenseNet121 image baseline with deterministic single-seed training
 - Partition-scoped authentication of external DICOM bytes before image access
-- Config-pinned bundle metadata authentication for image experiments
+- Observed bundle-manifest SHA-256 lineage for image training and linked evaluation
 - Separate validation and explicit test-evaluation runs with MLflow lineage
 - Immutable run-qualified metadata and neural model packages
 - Ruff, pytest, pre-commit, and continuous-integration checks
@@ -64,8 +64,10 @@ Every executable experiment is declared by a validated YAML file under `configs/
 [`docs/training.md`](docs/training.md) for the training workflow.
 
 Image training executes one configured seed per invocation. It reads and authenticates only train
-and validation DICOMs. `make evaluate` verifies the selected immutable package before accessing
-test data and reconstructs the model without the upstream pretrained-weight cache.
+and validation DICOMs, fingerprints the pretrained weight file immediately before and after model
+construction, and requires exact equality. It packages exact bundle and run lineage.
+`make evaluate` verifies the selected immutable package before accessing test data and reconstructs
+the model without the pretrained-weight cache.
 
 ## Cleaning generated artifacts
 

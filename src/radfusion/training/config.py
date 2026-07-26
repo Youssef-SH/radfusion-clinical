@@ -76,7 +76,6 @@ class DatasetConfig:
     registry_key: str
     manifest_directory: Path
     bundle_id: str
-    bundle_metadata_sha256: str | None
     task_id: str
     dataset_root: Path | None
 
@@ -172,7 +171,6 @@ def image_semantic_config_sha256(config: ExperimentConfig) -> str:
         "dataset": {
             "registry_key": config.dataset.registry_key,
             "bundle_id": config.dataset.bundle_id,
-            "bundle_metadata_sha256": config.dataset.bundle_metadata_sha256,
             "task_id": config.dataset.task_id,
         },
         "model": {
@@ -234,8 +232,6 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
             raise ConfigError("Image experiments require an image configuration section")
         if dataset.dataset_root is None:
             raise ConfigError("Image experiments require dataset.dataset_root")
-        if dataset.bundle_metadata_sha256 is None:
-            raise ConfigError("Image experiments require dataset.bundle_metadata_sha256")
     else:
         if model.registry_key not in {"metadata_logistic", "metadata_lightgbm"}:
             raise ConfigError("Metadata experiments require a registered metadata model")
@@ -264,18 +260,13 @@ def _dataset_config(value: object) -> DatasetConfig:
     _keys(
         data,
         required={"registry_key", "manifest_directory", "bundle_id", "task_id"},
-        optional={"dataset_root", "bundle_metadata_sha256"},
+        optional={"dataset_root"},
         context="dataset",
     )
     return DatasetConfig(
         registry_key=_path_component(data["registry_key"], "dataset.registry_key"),
         manifest_directory=Path(_text(data["manifest_directory"], "dataset.manifest_directory")),
         bundle_id=_path_component(data["bundle_id"], "dataset.bundle_id"),
-        bundle_metadata_sha256=(
-            _sha256(data["bundle_metadata_sha256"], "dataset.bundle_metadata_sha256")
-            if "bundle_metadata_sha256" in data
-            else None
-        ),
         task_id=_text(data["task_id"], "dataset.task_id"),
         dataset_root=(
             Path(_text(data["dataset_root"], "dataset.dataset_root"))
@@ -283,13 +274,6 @@ def _dataset_config(value: object) -> DatasetConfig:
             else None
         ),
     )
-
-
-def _sha256(value: object, field: str) -> str:
-    text = _text(value, field)
-    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
-        raise ConfigError(f"{field} must be exactly 64 lowercase hexadecimal characters")
-    return text
 
 
 def _model_config(value: object) -> ModelConfig:

@@ -26,14 +26,11 @@ def _write(tmp_path: Path, document: dict[str, object]) -> Path:
 def test_image_config_is_strict_single_seed_and_executable() -> None:
     config = load_experiment_config("configs/image_densenet.yaml")
 
+    assert config.config_version == 1
     assert config.executable is True
     assert config.training.seed == 42
     assert not hasattr(config.training, "seeds")
     assert config.dataset.dataset_root == Path("data/raw/rsna/extracted")
-    assert (
-        config.dataset.bundle_metadata_sha256
-        == "246f00dc185e6a2935e17317684de9de5026cd6d7e25843de138c09952428e75"
-    )
     assert config.model.modality == "image"
     assert dict(config.model.parameters) == {
         "encoder_name": "densenet121",
@@ -66,29 +63,6 @@ def test_image_semantic_config_identity_excludes_paths_but_binds_training_meanin
 
     assert image_semantic_config_sha256(changed_path) == image_semantic_config_sha256(baseline)
     assert image_semantic_config_sha256(changed_meaning) != image_semantic_config_sha256(baseline)
-
-
-@pytest.mark.parametrize("value", [None, "A" * 64, "a" * 63, "g" * 64])
-def test_image_config_requires_exact_bundle_metadata_sha256(
-    tmp_path: Path, value: str | None
-) -> None:
-    document = _image_document()
-    if value is None:
-        document["dataset"].pop("bundle_metadata_sha256")
-    else:
-        document["dataset"]["bundle_metadata_sha256"] = value
-
-    with pytest.raises(ConfigError, match="bundle_metadata_sha256"):
-        load_experiment_config(_write(tmp_path, document))
-
-
-def test_bundle_metadata_pin_changes_image_semantic_identity(tmp_path: Path) -> None:
-    baseline = load_experiment_config("configs/image_densenet.yaml")
-    document = _image_document()
-    document["dataset"]["bundle_metadata_sha256"] = "a" * 64
-    changed = load_experiment_config(_write(tmp_path, document))
-
-    assert image_semantic_config_sha256(changed) != image_semantic_config_sha256(baseline)
 
 
 def test_operational_image_fields_do_not_change_semantic_identity(tmp_path: Path) -> None:

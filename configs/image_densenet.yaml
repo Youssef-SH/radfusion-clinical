@@ -6,7 +6,6 @@ dataset:
   registry_key: rsna
   manifest_directory: data/manifests
   bundle_id: build-cfe6e3818fbc179af2cd6237641cdde716159a18c2d1430644bba71058adead0
-  bundle_metadata_sha256: 246f00dc185e6a2935e17317684de9de5026cd6d7e25843de138c09952428e75
   task_id: pneumonia
   dataset_root: data/raw/rsna/extracted
 

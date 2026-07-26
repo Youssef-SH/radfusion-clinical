@@ -22,7 +22,7 @@ from radfusion.evaluation.metrics import (
     target_sensitivity_threshold,
     youden_j_threshold,
 )
-from radfusion.models.cxr_baseline import authenticate_pretrained_weights
+from radfusion.models.cxr_baseline import fingerprint_pretrained_weights
 from radfusion.training.config import ExperimentConfig, image_semantic_config_sha256
 from radfusion.training.datasets import ImageRunData, RsnaImageDataset
 from radfusion.training.device import resolve_device
@@ -114,7 +114,6 @@ def train_image_experiment(
         "dependency_lock_sha256": lock_hash,
         "source_config_sha256": config.source_sha256,
         "semantic_config_sha256": image_semantic_config_sha256(config),
-        "bundle_metadata_sha256": str(config.dataset.bundle_metadata_sha256),
         "run_complete": "false",
     }
     initial_parameters = {
@@ -125,7 +124,6 @@ def train_image_experiment(
         "sensitivity_target": config.evaluation.sensitivity_target,
         "calibration_bins": config.evaluation.calibration_bins,
         **dict(config.model.parameters),
-        "bundle_metadata_sha256": config.dataset.bundle_metadata_sha256,
         **environment,
     }
     with tracked_run(
@@ -143,9 +141,9 @@ def train_image_experiment(
                 "label_policy_version": image_data.lineage.label_policy_version,
                 "source_authentication_success": "true",
                 "source_authentication_policy": image_data.authentication.policy_version,
-                "bundle_metadata_sha256": image_data.bundle_metadata_sha256,
             }
         )
+        mlflow.log_param("bundle_manifest_sha256", image_data.bundle_manifest_sha256)
         seed_neural_runtime(config.training.seed)
         train_transform = _transform(config, training=True)
         evaluation_transform = _transform(config, training=False)
@@ -176,10 +174,15 @@ def train_image_experiment(
         train_targets = image_data.train["target"].to_numpy(dtype=np.int8)
         positive_count, negative_count, pos_weight = training_class_weight(train_targets)
         model_builder = cast(ImageModelImplementation, get_model(config.model.registry_key))
+        weight_identity = fingerprint_pretrained_weights(str(config.model.parameters["weights"]))
         model = model_builder.build(config.model)
+        if (
+            fingerprint_pretrained_weights(str(config.model.parameters["weights"]))
+            != weight_identity
+        ):
+            raise RuntimeError("Pretrained weight file changed during model construction")
         if not isinstance(model, nn.Module):
             raise TypeError("Registered image model builder must return torch.nn.Module")
-        weight_identity = authenticate_pretrained_weights(str(config.model.parameters["weights"]))
         model.to(runtime.device)
         fit = fit_image_model(
             model,
@@ -236,7 +239,7 @@ def train_image_experiment(
         document["image_run"] = {
             "lineage": {
                 "bundle_id": image_data.lineage.bundle_id,
-                "bundle_metadata_sha256": image_data.bundle_metadata_sha256,
+                "bundle_manifest_sha256": image_data.bundle_manifest_sha256,
                 "split_assignment_id": image_data.lineage.split_assignment_id,
                 "task": image_data.lineage.task_id,
                 "label_policy_version": image_data.lineage.label_policy_version,
@@ -452,7 +455,7 @@ def _manifest(
         "task": image_data.lineage.task_id,
         "positive_class": 1,
         "bundle_id": image_data.lineage.bundle_id,
-        "bundle_metadata_sha256": image_data.bundle_metadata_sha256,
+        "bundle_manifest_sha256": image_data.bundle_manifest_sha256,
         "split_assignment_id": image_data.lineage.split_assignment_id,
         "label_policy_version": image_data.lineage.label_policy_version,
         "source_config_sha256": config.source_sha256,

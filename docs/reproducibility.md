@@ -32,8 +32,9 @@ uv run python -m radfusion.data.rsna_manifest \
   --test-ratio 0.15
 ```
 
-The build authenticates both source CSV files and every labeled DICOM by SHA-256. It validates the
-complete staged bundle before publishing it and updating `CURRENT`.
+The build records both source CSV SHA-256 values and authenticates every labeled DICOM against the
+source inventory. It validates the complete staged bundle before publishing it and updating
+`CURRENT`.
 
 The default split recipe groups samples by patient and stratifies on the binary challenge target.
 Within each target stratum, patients are ordered by SHA-256 of the UTF-8 bytes
@@ -78,10 +79,10 @@ training data. Validation selects the LightGBM stopping point and both operating
 `make evaluate` verifies those choices against the source training run before applying them to
 test in a separate linked run.
 
-Image configs additionally pin the exact bundle manifest SHA-256. That pin authenticates manifest
-bytes, whose physical hashes authenticate Parquet bytes and whose logical hashes bind bundle
-identity. Training and test evaluation require matching source-inventory identities while
-authenticating only their authorized partitions.
+Image experiment configurations pin the semantic bundle ID. Validation computes the observed
+bundle-manifest SHA-256 and verifies the manifest's physical, logical, semantic, split, and source
+contracts. Training records the hash in its package and an MLflow parameter; linked test evaluation
+requires the same bundle-manifest SHA-256 while authenticating only its authorized partition.
 
 Training runs record the Git commit and dirty status, exact configuration bytes and hash,
 dependency-lock hash, environment, dataset identity, and model lineage. Formal test evaluation
@@ -91,21 +92,24 @@ to its source training run.
 
 Image training authenticates only train and validation DICOMs against the bundle source inventory.
 It seeds Python, NumPy, PyTorch, DataLoader shuffling, workers, and deterministic kernels once per
-run. The selected CPU checkpoint may come from head-only warm-up or full fine-tuning. Explicit test
-evaluation verifies the package, checkpoint, code, lock, and model structure before loading test
-rows, then authenticates only test DICOMs and applies the validation thresholds unchanged. It
-reconstructs the architecture without reading or downloading the original pretrained cache.
+run. Image training fingerprints the materialized pretrained weight file immediately before and
+after model construction and requires exact equality. The selected CPU checkpoint may come from
+head-only warm-up or full fine-tuning. Explicit test evaluation verifies the package, checkpoint,
+code, lock, and model structure before loading test rows, then authenticates only test DICOMs and
+applies the validation thresholds unchanged. It reconstructs the architecture without reading or
+downloading the original pretrained cache.
 
 Epoch records contain the learning rates used for that epoch. CUDA runtime, cuDNN, GPU identity,
-device index, and compute capability are recorded as runtime provenance and excluded from semantic
-package identity.
+device index, and compute capability are recorded as runtime provenance and excluded from the model
+package ID.
 
-Neural package identity binds a canonical digest of meaning-bearing image configuration. Data,
-manifest, model, and report paths remain operational values, while the archived YAML is validated
-separately by its exact byte hash.
+Neural package identity is an exact provenance identity over meaning-bearing image configuration
+and package lineage, including the selected checkpoint and observed bundle-manifest SHA-256.
+Runtime provenance, operational paths, and training-run ID remain outside this identity; the
+archived YAML is validated separately by its exact byte hash.
 
-The image config represents one independent seed. Runs for seeds 17, 42, and 2026 are executed
-separately; the repository does not rank, average, or orchestrate those runs.
+Each invocation runs one explicit seed. Current commands do not aggregate seeds; planned reporting
+may summarize independent runs. No favorable seed is selected as canonical.
 
 ## Probability and operating-point metrics
 
@@ -153,18 +157,12 @@ do not report that tabular latency measurement.
 ## Artifact lineage
 
 Bundle identity and acceptance rules are defined in [`data_contract.md`](data_contract.md).
-Immutable model lineage and comparison-table roles are defined in [`training.md`](training.md).
+Model lineage, artifact ownership, and comparison-table roles are defined in
+[`training.md`](training.md).
 
-MLflow stores the experiment history. Every training attempt logs the exact loaded YAML before
-dataset access and records resolved split and label-policy lineage before fitting. Successful
-training runs record resolved parameters, validation metrics, thresholds, and references to the
-project-owned outputs. Training runs own model packages; linked test runs record test metrics and
-report references. The artifact ownership contract is defined in [`training.md`](training.md).
-
-Run metadata is stored in `mlflow.db`, and training configuration artifacts are stored under
-`mlartifacts/`. Model packages live under `models/`, and reports live under `reports/`. These
-locations are generated state. `make clean` preserves completed outputs and removes caches and
-interrupted-publication staging state.
+MLflow records exact loaded training configs, resolved parameters, scalar metrics, provenance,
+lineage, completion state, and project-output references. Linked test runs add evaluator
+provenance, test metrics, and their source package and training-run relationship.
 
 ## Quality gates
 

@@ -101,7 +101,7 @@ def uv_lock_sha256(path: str | Path = "uv.lock") -> str:
 
 
 def log_source_config(config: ExperimentConfig) -> None:
-    """Log the authenticated source configuration for the active MLflow run."""
+    """Log the exact loaded experiment configuration for the active MLflow run."""
     with tempfile.TemporaryDirectory(prefix="radfusion-config-") as temporary_directory:
         path = Path(temporary_directory) / "resolved_config.yaml"
         path.write_bytes(config.source_bytes)

@@ -75,7 +75,12 @@ class DatasetImplementation(Protocol):
     def load_image_train_validation(self, config: DatasetConfig) -> Any:
         """Load and authenticate image train and validation rows."""
 
-    def load_image_test(self, config: DatasetConfig) -> Any:
+    def load_image_test(
+        self,
+        config: DatasetConfig,
+        *,
+        expected_manifest_sha256: str,
+    ) -> Any:
         """Load and authenticate image test rows."""
 
 

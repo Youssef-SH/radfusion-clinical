@@ -12,7 +12,7 @@ from radfusion.models.cxr_baseline import (
     CxrBinaryClassifier,
     ImageDenseNetModel,
     StandardCxrEncoder,
-    authenticate_pretrained_weights,
+    fingerprint_pretrained_weights,
 )
 from radfusion.training.config import load_experiment_config
 from radfusion.training.registry import MODELS, get_model
@@ -121,12 +121,12 @@ def test_image_builder_rejects_non_module_factory_output() -> None:
         ImageDenseNetModel(encoder_factory=lambda **_: object()).build(config.model)
 
 
-def test_pretrained_weight_identity_authenticates_materialized_cache_bytes(
+def test_pretrained_weight_identity_fingerprints_materialized_file_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     filename = "weights.pt"
     weight_path = tmp_path / filename
-    weight_path.write_bytes(b"authenticated-weights")
+    weight_path.write_bytes(b"weight-bytes")
     monkeypatch.setitem(
         xrv.models.model_urls,
         "synthetic-weights",
@@ -134,22 +134,22 @@ def test_pretrained_weight_identity_authenticates_materialized_cache_bytes(
     )
     monkeypatch.setattr(xrv.utils, "get_cache_dir", lambda: str(tmp_path))
 
-    identity = authenticate_pretrained_weights("synthetic-weights")
+    identity = fingerprint_pretrained_weights("synthetic-weights")
 
     assert identity.declared_name == "synthetic-weights"
     assert identity.cache_filename == filename
-    assert identity.byte_size == len(b"authenticated-weights")
+    assert identity.byte_size == len(b"weight-bytes")
     assert len(identity.sha256) == 64
     weight_path.unlink()
-    with pytest.raises(FileNotFoundError, match="Materialized pretrained weight"):
-        authenticate_pretrained_weights("synthetic-weights")
+    with pytest.raises(FileNotFoundError, match="materialized before formal training"):
+        fingerprint_pretrained_weights("synthetic-weights")
 
 
-def test_pretrained_weight_identity_rejects_unknown_symlink_and_unnamed_url(
+def test_pretrained_weight_identity_rejects_unknown_and_unnamed_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with pytest.raises(ValueError, match="Unknown"):
-        authenticate_pretrained_weights("unknown-weight")
+        fingerprint_pretrained_weights("unknown-weight")
 
     monkeypatch.setattr(xrv.utils, "get_cache_dir", lambda: str(tmp_path))
     monkeypatch.setitem(
@@ -158,18 +158,30 @@ def test_pretrained_weight_identity_rejects_unknown_symlink_and_unnamed_url(
         {"weights_url": "https://example.invalid/"},
     )
     with pytest.raises(ValueError, match="does not name"):
-        authenticate_pretrained_weights("unnamed-weight")
+        fingerprint_pretrained_weights("unnamed-weight")
 
-    target = tmp_path / "target.pt"
-    target.write_bytes(b"weight")
-    (tmp_path / "link.pt").symlink_to(target)
+
+@pytest.mark.parametrize("entry_kind", ["symlink", "directory"])
+def test_pretrained_weight_identity_rejects_nonregular_cache_entries(
+    entry_kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    filename = "weight.pt"
+    cache_path = tmp_path / filename
+    if entry_kind == "symlink":
+        target = tmp_path / "target.pt"
+        target.write_bytes(b"weight")
+        cache_path.symlink_to(target)
+    else:
+        cache_path.mkdir()
+
+    monkeypatch.setattr(xrv.utils, "get_cache_dir", lambda: str(tmp_path))
     monkeypatch.setitem(
         xrv.models.model_urls,
-        "symlink-weight",
-        {"weights_url": "https://example.invalid/link.pt"},
+        "invalid-weight",
+        {"weights_url": f"https://example.invalid/{filename}"},
     )
-    with pytest.raises(FileNotFoundError, match="missing"):
-        authenticate_pretrained_weights("symlink-weight")
+    with pytest.raises(ValueError, match="regular"):
+        fingerprint_pretrained_weights("invalid-weight")
 
 
 def test_modified_pretrained_bytes_change_identity(
@@ -183,9 +195,9 @@ def test_modified_pretrained_bytes_change_identity(
         "mutable-weight",
         {"weights_url": "https://example.invalid/weight.pt"},
     )
-    first = authenticate_pretrained_weights("mutable-weight")
+    first = fingerprint_pretrained_weights("mutable-weight")
     path.write_bytes(b"second")
-    second = authenticate_pretrained_weights("mutable-weight")
+    second = fingerprint_pretrained_weights("mutable-weight")
 
     assert first.sha256 != second.sha256
     assert first.byte_size != second.byte_size
@@ -205,7 +217,7 @@ def test_evaluation_architecture_is_built_without_pretrained_cache_access() -> N
     assert observed_weights == [None]
 
 
-# This warning comes from TorchXRayVision's legacy serialized upstream checkpoint.
+# This warning comes from TorchXRayVision's serialized pretrained weight file.
 # RadFusion model.pt packages will store explicit state dictionaries rather than pickled modules.
 @pytest.mark.filterwarnings(
     "ignore:source code of class .* has changed.*:torch.serialization.SourceChangeWarning"

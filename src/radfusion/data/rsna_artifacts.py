@@ -175,6 +175,14 @@ class WriteResult:
     arrow_ipc_sha256: Mapping[str, str]
 
 
+@dataclass(frozen=True)
+class ValidatedBundleReference:
+    """Validated bundle manifest and its exact serialized-byte identity."""
+
+    manifest: Mapping[str, Any]
+    manifest_sha256: str
+
+
 def build_rsna_artifacts(
     dataset_root: str | Path, split_config: SplitConfig | None = None
 ) -> BuildResult:
@@ -367,11 +375,12 @@ def validate_bundle_directory(
     enforce_directory_name: bool = True,
 ) -> dict[str, Any]:
     """Require complete metadata plus matching file and Arrow IPC hashes for a bundle."""
-    metadata = validate_bundle_reference(
+    validated = validate_bundle_reference(
         bundle_directory,
         expected_bundle_id=expected_bundle_id,
         enforce_directory_name=enforce_directory_name,
     )
+    metadata = dict(validated.manifest)
     directory = Path(bundle_directory)
     expected_files = {
         SAMPLES_FILENAME: RSNA_SAMPLE_SCHEMA,
@@ -424,10 +433,10 @@ def validate_bundle_reference(
     bundle_directory: str | Path,
     *,
     expected_bundle_id: str | None = None,
-    expected_metadata_sha256: str | None = None,
+    expected_manifest_sha256: str | None = None,
     enforce_directory_name: bool = True,
-) -> dict[str, Any]:
-    """Validate bundle identity and schemas without materializing artifact rows."""
+) -> ValidatedBundleReference:
+    """Validate a bundle reference and return its manifest and exact byte hash."""
     directory = Path(bundle_directory)
     expected_files = {
         SAMPLES_FILENAME: RSNA_SAMPLE_SCHEMA,
@@ -438,14 +447,19 @@ def validate_bundle_reference(
     }
     _require_exact_regular_entries(directory, {METADATA_FILENAME, *expected_files})
     metadata_path = directory / METADATA_FILENAME
-    if expected_metadata_sha256 is not None:
-        if not _sha256_text(expected_metadata_sha256):
-            raise ManifestBuildError("Expected bundle metadata SHA-256 is invalid")
-        if sha256_file(metadata_path) != expected_metadata_sha256:
-            raise ManifestBuildError("Bundle metadata SHA-256 does not match the configured pin")
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        metadata_bytes = metadata_path.read_bytes()
+    except OSError as exc:
+        raise ManifestBuildError(f"Bundle metadata is unreadable: {metadata_path}") from exc
+    observed_manifest_sha256 = hashlib.sha256(metadata_bytes).hexdigest()
+    if expected_manifest_sha256 is not None:
+        if not _sha256_text(expected_manifest_sha256):
+            raise ManifestBuildError("Expected bundle-manifest SHA-256 is invalid")
+        if observed_manifest_sha256 != expected_manifest_sha256:
+            raise ManifestBuildError("Bundle-manifest SHA-256 does not match expected lineage")
+    try:
+        metadata = json.loads(metadata_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ManifestBuildError(f"Bundle metadata is unreadable: {metadata_path}") from exc
     bundle_id = metadata.get("bundle", {}).get("bundle_id")
     if expected_bundle_id is not None and bundle_id != expected_bundle_id:
@@ -481,7 +495,7 @@ def validate_bundle_reference(
         raise ManifestBuildError("Bundle ID does not match deterministic bundle content")
     if enforce_directory_name and directory.name != bundle_id:
         raise ManifestBuildError("Bundle directory name does not match manifest identity")
-    return metadata
+    return ValidatedBundleReference(metadata, observed_manifest_sha256)
 
 
 def _require_exact_regular_entries(directory: Path, required_names: set[str]) -> None:

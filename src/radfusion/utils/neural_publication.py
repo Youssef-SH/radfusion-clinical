@@ -50,7 +50,7 @@ NEURAL_MANIFEST_FIELDS = frozenset(
         "task",
         "positive_class",
         "bundle_id",
-        "bundle_metadata_sha256",
+        "bundle_manifest_sha256",
         "split_assignment_id",
         "label_policy_version",
         "source_config_sha256",
@@ -243,7 +243,7 @@ def load_validated_neural_checkpoint(
 
 
 def neural_model_package_id(document: Mapping[str, Any]) -> str:
-    """Return the deterministic semantic identity of a neural package."""
+    """Return the deterministic exact provenance identity of a neural package."""
     if set(document) not in {
         NEURAL_IDENTITY_FIELDS,
         NEURAL_MANIFEST_FIELDS,
@@ -338,7 +338,7 @@ def _validate_manifest_metadata(
     ):
         raise ValueError("Neural model manifest positive class must be integer 1")
     for field in (
-        "bundle_metadata_sha256",
+        "bundle_manifest_sha256",
         "source_config_sha256",
         "semantic_config_sha256",
         "checkpoint_sha256",
@@ -352,7 +352,6 @@ def _validate_manifest_metadata(
     config = load_experiment_config(config_path)
     if (
         document["bundle_id"] != config.dataset.bundle_id
-        or document["bundle_metadata_sha256"] != config.dataset.bundle_metadata_sha256
         or document["task"] != config.dataset.task_id
         or document["model"] != config.model.registry_key
         or document["semantic_config_sha256"] != image_semantic_config_sha256(config)
@@ -444,7 +443,7 @@ def _validate_manifest_metadata(
         raise ValueError("Neural package training policy is invalid")
     _validate_nested_manifest(document, config)
     if document["model_package_id"] != neural_model_package_id(document):
-        raise ValueError("Neural package ID does not match its semantic payload")
+        raise ValueError("Neural package ID does not match its identity payload")
 
 
 def _validate_nested_manifest(document: dict[str, Any], config: ExperimentConfig) -> None:

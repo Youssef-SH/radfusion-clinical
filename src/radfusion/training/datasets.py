@@ -86,7 +86,7 @@ class ImageRunData:
     train: pd.DataFrame
     validation: pd.DataFrame
     lineage: DatasetLineage
-    bundle_metadata_sha256: str
+    bundle_manifest_sha256: str
     authentication: SourceAuthentication
 
 
@@ -96,7 +96,7 @@ class ImageTestData:
 
     test: pd.DataFrame
     lineage: DatasetLineage
-    bundle_metadata_sha256: str
+    bundle_manifest_sha256: str
     authentication: SourceAuthentication
 
 
@@ -236,17 +236,27 @@ class RsnaDataset:
             frame,
             partitions=("train", "validation"),
         )
+        manifest_sha256 = _required_manifest_sha256(bundle)
         return ImageRunData(
             train=_image_partition(frame, "train"),
             validation=_image_partition(frame, "validation"),
             lineage=_lineage(config, metadata),
-            bundle_metadata_sha256=sha256_file(bundle.metadata_path),
+            bundle_manifest_sha256=manifest_sha256,
             authentication=authentication,
         )
 
-    def load_image_test(self, config: DatasetConfig) -> ImageTestData:
+    def load_image_test(
+        self,
+        config: DatasetConfig,
+        *,
+        expected_manifest_sha256: str,
+    ) -> ImageTestData:
         """Load and authenticate test image rows only."""
-        bundle, metadata = _load_pinned_bundle(config, materialize_all_rows=False)
+        bundle, metadata = _load_pinned_bundle(
+            config,
+            materialize_all_rows=False,
+            expected_manifest_sha256=expected_manifest_sha256,
+        )
         frame = _task_frame(
             bundle,
             config.task_id,
@@ -260,10 +270,11 @@ class RsnaDataset:
             frame,
             partitions=("test",),
         )
+        manifest_sha256 = _required_manifest_sha256(bundle)
         return ImageTestData(
             test=_image_partition(frame, "test"),
             lineage=_lineage(config, metadata),
-            bundle_metadata_sha256=sha256_file(bundle.metadata_path),
+            bundle_manifest_sha256=manifest_sha256,
             authentication=authentication,
         )
 
@@ -275,12 +286,14 @@ class _PinnedBundlePaths:
     splits_path: Path
     source_inventory_path: Path
     metadata_path: Path
+    manifest_sha256: str | None = None
 
 
 def _load_pinned_bundle(
     config: DatasetConfig,
     *,
     materialize_all_rows: bool = True,
+    expected_manifest_sha256: str | None = None,
 ) -> tuple[_PinnedBundlePaths, dict[str, object]]:
     dataset_root = config.manifest_directory / config.registry_key
     bundle_directory = dataset_root / BUNDLES_DIRECTORY / config.bundle_id
@@ -289,14 +302,15 @@ def _load_pinned_bundle(
             bundle_directory,
             expected_bundle_id=config.bundle_id,
         )
+        manifest_sha256 = None
     else:
-        if config.bundle_metadata_sha256 is None:
-            raise ManifestBuildError("Image bundle reference requires a metadata SHA-256 pin")
-        metadata = validate_bundle_reference(
+        validated = validate_bundle_reference(
             bundle_directory,
             expected_bundle_id=config.bundle_id,
-            expected_metadata_sha256=config.bundle_metadata_sha256,
+            expected_manifest_sha256=expected_manifest_sha256,
         )
+        metadata = dict(validated.manifest)
+        manifest_sha256 = validated.manifest_sha256
     return (
         _PinnedBundlePaths(
             bundle_directory / SAMPLES_FILENAME,
@@ -304,9 +318,16 @@ def _load_pinned_bundle(
             bundle_directory / SPLITS_FILENAME,
             bundle_directory / SOURCE_INVENTORY_FILENAME,
             bundle_directory / METADATA_FILENAME,
+            manifest_sha256,
         ),
         metadata,
     )
+
+
+def _required_manifest_sha256(bundle: _PinnedBundlePaths) -> str:
+    if bundle.manifest_sha256 is None:
+        raise ManifestBuildError("Image bundle validation did not return manifest byte identity")
+    return bundle.manifest_sha256
 
 
 def _task_frame(

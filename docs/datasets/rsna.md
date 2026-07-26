@@ -71,8 +71,9 @@ Patient age, sex, projection, pixel spacing, and image dimensions enter the samp
 Photometric interpretation, transfer syntax, bit depth, compression, modality, body part, and UID
 consistency are source-quality evidence.
 
-The bundle authenticates each source CSV and DICOM file by SHA-256. Metadata models consume
-validated DICOM header fields. SOP Instance UID is required and unique across labeled samples.
+The bundle records each source CSV's SHA-256 and authenticates every labeled DICOM against the
+source inventory. Metadata models consume validated DICOM header fields. SOP Instance UID is
+required and unique across labeled samples.
 
 Metadata values and missingness, including pixel spacing, can encode demographic, workflow,
 acquisition, and equipment associations. The metadata-only baselines quantify those associations

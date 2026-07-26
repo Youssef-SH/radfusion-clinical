@@ -1,4 +1,4 @@
-"""Evaluate one completed metadata training run on its pinned test partition."""
+"""Evaluate one completed training run on its pinned test partition."""
 
 from __future__ import annotations
 

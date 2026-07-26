@@ -10,7 +10,6 @@ dataset:
   registry_key: rsna
   manifest_directory: data/manifests
   bundle_id: build-<sha256>
-  bundle_metadata_sha256: <sha256>  # required for image experiments
   task_id: pneumonia
 
 model:
@@ -36,7 +35,7 @@ mlflow:
 The loader rejects missing, unknown, and duplicate keys. Each experiment names an exact immutable
 bundle ID. `training.seed` is the single randomness authority.
 
-The executable configs are `configs/metadata_logistic.yaml`,
+All executable configs use schema version 1. They are `configs/metadata_logistic.yaml`,
 `configs/metadata_lightgbm.yaml`, and `configs/image_densenet.yaml`.
 
 ## Feature boundary
@@ -74,10 +73,10 @@ LightGBM early stopping, selects both operating thresholds on validation, and pu
 model.
 
 Test evaluation is a separate run. Before reading test data, it validates the package and its
-semantic ID, source-run lineage, configuration and model hashes, fitted input contract,
-validation-derived choices, and LightGBM best iteration. Formal evaluation accepts packages from
-clean training commits and requires the evaluator to use the same clean Git commit and
-dependency lock. It then reads only test and applies the verified choices unchanged.
+semantic ID, lineage to the source training run, configuration and model hashes, fitted input
+contract, validation-derived choices, and LightGBM best iteration. Formal evaluation accepts
+packages from clean training commits and requires the evaluator to use the same clean Git commit
+and dependency lock. It then reads only test and applies the verified choices unchanged.
 
 The built-in dataset and model adapters are held in immutable mappings. One tabular runner owns
 metadata training, one neural runner owns image training, and the explicit evaluator owns test
@@ -91,9 +90,20 @@ Each invocation trains one seed. Training validates the pinned bundle, loads onl
 validation rows, and authenticates their DICOM size and SHA-256 against the source inventory before
 constructing datasets or the model.
 
-The config-pinned manifest hash authenticates the exact bundle metadata bytes before their
-artifact declarations are trusted. Training and test evaluation also require the same source
-inventory file and logical identities; their authorized row digests differ by partition.
+The image configuration pins the immutable semantic bundle ID. Bundle validation computes the
+observed bundle-manifest SHA-256 and verifies its physical, logical, semantic, split, and source
+contracts. Training freezes that exact identity in the model package and copies it to an MLflow
+parameter; linked evaluation requires the same bundle-manifest SHA-256 before test access.
+Authorized train/validation and test source-authentication proofs retain distinct row digests.
+
+### Pretrained weight file and provenance
+
+TorchXRayVision normally obtains `densenet121-res224-chex` under
+`~/.torchxrayvision/models_data/`; offline runs must prepare the URL-derived cache file there.
+Image training requires that entry to be a regular non-symlink file, fingerprints it immediately
+before and after model construction, and requires exact equality. This establishes local run
+provenance but does not independently authenticate the file against an official upstream digest.
+Test evaluation reconstructs with `weights=None` and loads only the packaged trained state.
 
 Training performs head-only warm-up followed by full fine-tuning. Validation Average Precision
 selects the retained state across both stages and controls fine-tuning scheduling and early
@@ -117,16 +127,16 @@ models/rsna/runs/<training-run-id>/
 
 `model.pt` is a validated CPU tensor state dictionary with selection metadata. The package manifest
 binds the checkpoint, path-independent experiment meaning, archived configuration, dataset and
-split lineage, source authentication, pretrained weights, transform contracts, training policy,
-selected validation state, and frozen thresholds. The evaluator validates this package,
-reconstructs the DenseNet architecture without loading the original TorchXRayVision cache, and
-strictly loads the complete state before reading or authenticating test data.
+split lineage, source authentication, pretrained-weight byte identity, transform contracts,
+training policy, selected validation state, and frozen thresholds. The evaluator validates this
+package, reconstructs the DenseNet architecture without loading the original TorchXRayVision
+cache, and strictly loads the complete state before reading or authenticating test data.
 
 ## Tracking and outputs
 
 Model packages under `models/` and complete reports under `reports/` are the authoritative
-physical outputs. MLflow stores the run ledger, parameters, scalar metrics, provenance, lineage,
-completion state, references to project-owned outputs, and the exact loaded training
+physical outputs. MLflow stores the run ledger, status, parameters, scalar metrics, provenance,
+lineage, completion state, references to project-owned outputs, and the exact loaded training
 configuration. Run metadata lives in `mlflow.db`; training configuration artifacts live under
 `mlartifacts/`. Inspect local runs with:
 
@@ -150,11 +160,10 @@ models/rsna/runs/<training-run-id>/
 
 Image packages use the same hierarchy with `model.pt` in place of `model.skops`.
 
-The manifest records `model_package_schema_version` and a deterministic `model_package_id` over
-the model, path-independent experiment meaning, bundle and split assignment, task,
-model family, seed, Git and dependency state, validation selection, thresholds, and input contract.
-Operational paths are outside this identity; the archived configuration retains exact byte-hash
-validation.
+The manifest records `model_package_schema_version` and a deterministic `model_package_id`. Image
+package identity includes the selected checkpoint and observed bundle-manifest SHA-256, making it
+an exact provenance identity. Runtime provenance, operational paths, and training-run ID remain
+outside this identity; the archived configuration retains exact byte-hash validation.
 
 Dirty training runs may publish traceable packages, but those packages are ineligible for formal
 test evaluation. Test-evaluation runs record their own Git and dependency provenance, the model

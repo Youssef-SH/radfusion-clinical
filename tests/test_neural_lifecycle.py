@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -22,7 +23,11 @@ from radfusion.data.rsna_artifacts import SOURCE_INVENTORY_FILENAME
 from radfusion.data.rsna_source import ManifestBuildError
 from radfusion.models.cxr_baseline import PretrainedWeightIdentity
 from radfusion.training.compare import regenerate_comparison
-from radfusion.training.config import image_semantic_config_sha256, load_experiment_config
+from radfusion.training.config import (
+    ExperimentConfig,
+    image_semantic_config_sha256,
+    load_experiment_config,
+)
 from radfusion.training.datasets import (
     SOURCE_AUTHENTICATION_POLICY_VERSION,
     ImageRunData,
@@ -706,7 +711,7 @@ def _manifest(config_bytes: bytes, checkpoint: dict[str, object]) -> dict[str, o
         "task": "pneumonia",
         "positive_class": 1,
         "bundle_id": config.dataset.bundle_id,
-        "bundle_metadata_sha256": config.dataset.bundle_metadata_sha256,
+        "bundle_manifest_sha256": "e" * 64,
         "split_assignment_id": "split-test",
         "label_policy_version": "label-v1",
         "source_config_sha256": digest,
@@ -917,7 +922,9 @@ def test_strict_checkpoint_loading_rejects_parameter_mismatch(mutation: str) -> 
         strict_load_checkpoint(_TinyImageModel(), document)
 
 
-def test_safe_loader_rejects_whole_module_and_package_identity_is_semantic(tmp_path: Path) -> None:
+def test_safe_loader_rejects_whole_module_and_package_identity_binds_provenance(
+    tmp_path: Path,
+) -> None:
     unsafe = tmp_path / "unsafe.pt"
     torch.save(_TinyImageModel(), unsafe)
     with pytest.raises(ValueError, match="safe tensor loader"):
@@ -940,7 +947,7 @@ def test_safe_loader_rejects_whole_module_and_package_identity_is_semantic(tmp_p
         lambda value: value.update({"checkpoint_sha256": "e" * 64}),
         lambda value: value.update({"semantic_config_sha256": "e" * 64}),
         lambda value: value.update({"bundle_id": "build-changed"}),
-        lambda value: value.update({"bundle_metadata_sha256": "8" * 64}),
+        lambda value: value.update({"bundle_manifest_sha256": "8" * 64}),
         lambda value: value.update({"split_assignment_id": "split-changed"}),
         lambda value: value.update({"task": "changed-task"}),
         lambda value: value.update({"label_policy_version": "changed-label-policy"}),
@@ -1025,14 +1032,24 @@ def test_source_authentication_failure_precedes_model_construction(
     assert runs[0].data.tags["run_complete"] == "false"
 
 
-def test_synthetic_image_training_package_and_separate_evaluation(
+@dataclass
+class _SyntheticImageLifecycle:
+    config: ExperimentConfig
+    adapter: Any
+    weight: PretrainedWeightIdentity
+    tracking_uri: str
+    build_calls: list[str]
+    construction_events: list[str]
+    seed_calls: list[int]
+
+
+def _synthetic_image_lifecycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+) -> _SyntheticImageLifecycle:
     document = yaml.safe_load(Path("configs/image_densenet.yaml").read_text(encoding="utf-8"))
     document["dataset"].update(
         {
             "bundle_id": "build-synthetic",
-            "bundle_metadata_sha256": "e" * 64,
             "dataset_root": str(tmp_path / "raw"),
             "manifest_directory": str(tmp_path / "manifests"),
         }
@@ -1094,25 +1111,28 @@ def test_synthetic_image_training_package_and_separate_evaluation(
                 train=frame("train"),
                 validation=frame("validation"),
                 lineage=lineage,
-                bundle_metadata_sha256="e" * 64,
+                bundle_manifest_sha256="e" * 64,
                 authentication=authentication(("train", "validation")),
             )
 
-        def load_image_test(self, dataset_config):
+        def load_image_test(self, dataset_config, *, expected_manifest_sha256):
+            assert expected_manifest_sha256 == "e" * 64
             self.test_calls += 1
             return ImageTestData(
                 test=frame("test"),
                 lineage=lineage,
-                bundle_metadata_sha256="e" * 64,
+                bundle_manifest_sha256="e" * 64,
                 authentication=authentication(("test",)),
             )
 
     build_calls = []
+    construction_events = []
 
     class Builder:
         def build(self, model_config):
             assert model_config.modality == "image"
             build_calls.append(model_config.registry_key)
+            construction_events.append("build")
             return _TinyImageModel()
 
         def build_architecture(self, model_config):
@@ -1137,94 +1157,87 @@ def test_synthetic_image_training_package_and_separate_evaluation(
         monkeypatch.setattr(f"{module}.RsnaImageDataset", synthetic_dataset)
         monkeypatch.setattr(f"{module}.git_revision", lambda: ("commit-test", False))
         monkeypatch.setattr(f"{module}.uv_lock_sha256", lambda: "9" * 64)
+
+    def fingerprint(weights):
+        assert weights == "densenet121-res224-chex"
+        construction_events.append("fingerprint")
+        return weight
+
     monkeypatch.setattr(
-        "radfusion.training.train_image.authenticate_pretrained_weights",
-        lambda weights: weight,
+        "radfusion.training.train_image.fingerprint_pretrained_weights",
+        fingerprint,
     )
 
     seed_calls = []
     monkeypatch.setattr("radfusion.training.train_image.seed_neural_runtime", seed_calls.append)
 
     tracking_uri = f"sqlite:///{(tmp_path / 'mlflow.db').as_posix()}"
-    training = train_image_experiment(config, tracking_uri=tracking_uri)
-    assert adapter.test_calls == 0
-    assert seed_calls == [config.training.seed]
-    assert build_calls == ["image_densenet"]
-    assert training.model_path.name == "model.pt"
-    assert validate_published_neural_model(training.model_path.parent)["modality"] == "image"
-
-    manifest_path = training.model_path.parent / "model_manifest.json"
-    original_manifest = manifest_path.read_bytes()
-    tampered_manifest = json.loads(original_manifest)
-    tampered_manifest["model_package_id"] = "model-package-" + "0" * 64
-    manifest_path.write_text(json.dumps(tampered_manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="package ID"):
-        evaluate_training_run(training.run_id, tracking_uri=tracking_uri)
-    assert adapter.test_calls == 0
-    manifest_path.write_bytes(original_manifest)
-
-    config_archive = training.model_path.parent / "resolved_config.yaml"
-    original_config = config_archive.read_bytes()
-    config_archive.write_bytes(original_config + b"\n# tampered\n")
-    with pytest.raises(ValueError, match="config hash"):
-        evaluate_training_run(training.run_id, tracking_uri=tracking_uri)
-    assert adapter.test_calls == 0
-    config_archive.write_bytes(original_config)
-
-    original_checkpoint = training.model_path.read_bytes()
-    training.model_path.write_bytes(original_checkpoint + b"tampered")
-    with pytest.raises(ValueError, match="checkpoint hash"):
-        evaluate_training_run(training.run_id, tracking_uri=tracking_uri)
-    assert adapter.test_calls == 0
-    training.model_path.write_bytes(original_checkpoint)
-
-    monkeypatch.setattr("radfusion.training.evaluate_image.git_revision", lambda: ("other", False))
-    with pytest.raises(ValueError, match="Git commit"):
-        evaluate_training_run(training.run_id, tracking_uri=tracking_uri)
-    assert adapter.test_calls == 0
-    monkeypatch.setattr(
-        "radfusion.training.evaluate_image.git_revision", lambda: ("commit-test", False)
+    return _SyntheticImageLifecycle(
+        config=config,
+        adapter=adapter,
+        weight=weight,
+        tracking_uri=tracking_uri,
+        build_calls=build_calls,
+        construction_events=construction_events,
+        seed_calls=seed_calls,
     )
 
-    monkeypatch.setattr("radfusion.training.evaluate_image.uv_lock_sha256", lambda: "8" * 64)
-    with pytest.raises(ValueError, match="dependency lock"):
-        evaluate_training_run(training.run_id, tracking_uri=tracking_uri)
-    assert adapter.test_calls == 0
-    monkeypatch.setattr("radfusion.training.evaluate_image.uv_lock_sha256", lambda: "9" * 64)
 
-    client = configure_mlflow(tracking_uri=tracking_uri)
-    source = client.get_run(training.run_id)
-    original_ap = source.data.metrics["validation_average_precision"]
-    client.log_metric(training.run_id, "validation_average_precision", original_ap + 0.01)
-    with pytest.raises(ValueError, match="validation_average_precision"):
-        evaluate_training_run(training.run_id, tracking_uri=tracking_uri)
-    assert adapter.test_calls == 0
-    client.log_metric(training.run_id, "validation_average_precision", original_ap)
+def _assert_single_failed_training_without_outputs(setup: _SyntheticImageLifecycle) -> None:
+    client = configure_mlflow(tracking_uri=setup.tracking_uri)
+    experiment = client.get_experiment_by_name(setup.config.mlflow.experiment_name)
+    assert experiment is not None
+    failed_runs = [
+        run
+        for run in client.search_runs(experiment_ids=[experiment.experiment_id])
+        if run.info.status == "FAILED"
+        and run.data.tags.get("run_kind") == "training"
+        and run.data.tags.get("run_complete") == "false"
+    ]
+    assert len(failed_runs) == 1
+    run_id = failed_runs[0].info.run_id
+    assert not (setup.config.training.model_directory / "runs" / run_id).exists()
+    assert not (
+        setup.config.training.report_directory / setup.config.dataset.registry_key / "runs" / run_id
+    ).exists()
 
-    original_size = source.data.metrics["model_size_mib"]
-    client.log_metric(training.run_id, "model_size_mib", original_size + 0.01)
-    with pytest.raises(ValueError, match="model_size_mib"):
-        evaluate_training_run(training.run_id, tracking_uri=tracking_uri)
-    assert adapter.test_calls == 0
-    client.log_metric(training.run_id, "model_size_mib", original_size)
 
-    evaluation = evaluate_training_run(training.run_id, tracking_uri=tracking_uri)
-    assert adapter.test_calls == 1
-    assert build_calls == ["image_densenet", "image_densenet"]
+def test_synthetic_image_training_package_and_separate_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = _synthetic_image_lifecycle(tmp_path, monkeypatch)
+    training = train_image_experiment(setup.config, tracking_uri=setup.tracking_uri)
+    assert setup.adapter.test_calls == 0
+    assert setup.seed_calls == [setup.config.training.seed]
+    assert setup.build_calls == ["image_densenet"]
+    assert setup.construction_events == ["fingerprint", "build", "fingerprint"]
+    assert training.model_path.name == "model.pt"
+    package_manifest = validate_published_neural_model(training.model_path.parent)
+    assert package_manifest["model_package_schema_version"] == 1
+    assert package_manifest["modality"] == "image"
+    assert package_manifest["bundle_manifest_sha256"] == "e" * 64
+    recorded_training = configure_mlflow(tracking_uri=setup.tracking_uri).get_run(training.run_id)
+    assert recorded_training.data.tags["run_complete"] == "true"
+    assert "bundle_manifest_sha256" not in recorded_training.data.tags
+    assert recorded_training.data.params["bundle_manifest_sha256"] == "e" * 64
+
+    evaluation = evaluate_training_run(training.run_id, tracking_uri=setup.tracking_uri)
+    assert setup.adapter.test_calls == 1
+    assert setup.build_calls == ["image_densenet", "image_densenet"]
     assert evaluation.training_run_id == training.run_id
     assert evaluation.run_id != training.run_id
     assert evaluation.artifact_directory.is_dir()
-    client = configure_mlflow(tracking_uri=tracking_uri)
-    training_run = client.get_run(training.run_id)
+    client = configure_mlflow(tracking_uri=setup.tracking_uri)
     evaluation_run = client.get_run(evaluation.run_id)
-    assert training_run.data.tags["run_complete"] == "true"
     assert evaluation_run.data.tags["run_complete"] == "true"
     assert evaluation_run.data.tags["source_training_run_id"] == training.run_id
     assert evaluation_run.data.tags["model_package_id"] == training.model_package_id
+    assert "bundle_manifest_sha256" not in evaluation_run.data.tags
+    assert evaluation_run.data.params["bundle_manifest_sha256"] == "e" * 64
     assert evaluation_run.data.params["evaluation_runtime_resolved_device"] == "cpu"
 
     csv_path, _, rows = regenerate_comparison(
-        tracking_uri=tracking_uri,
+        tracking_uri=setup.tracking_uri,
         output_directory=tmp_path / "comparison",
     )
     comparison = pd.read_csv(csv_path)
@@ -1232,20 +1245,145 @@ def test_synthetic_image_training_package_and_separate_evaluation(
     assert comparison["run_id"].tolist() == [evaluation.run_id]
     assert comparison["modality"].tolist() == ["image"]
 
+
+@pytest.mark.parametrize("changed_field", ["byte_size", "sha256"])
+def test_pretrained_weight_mutation_aborts_before_fitting(
+    changed_field: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = _synthetic_image_lifecycle(tmp_path, monkeypatch)
+    changed = (
+        replace(setup.weight, byte_size=setup.weight.byte_size + 1)
+        if changed_field == "byte_size"
+        else replace(setup.weight, sha256="0" * 64)
+    )
+    observed = iter((setup.weight, changed))
+    monkeypatch.setattr(
+        "radfusion.training.train_image.fingerprint_pretrained_weights",
+        lambda weights: next(observed),
+    )
+    monkeypatch.setattr(
+        "radfusion.training.train_image.fit_image_model",
+        lambda *args, **kwargs: pytest.fail("fitting must not begin"),
+    )
+
+    with pytest.raises(RuntimeError, match="changed during model construction"):
+        train_image_experiment(setup.config, tracking_uri=setup.tracking_uri)
+
+
+def test_missing_pretrained_weight_prevents_model_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = _synthetic_image_lifecycle(tmp_path, monkeypatch)
+
+    def missing_weight(weights):
+        del weights
+        raise FileNotFoundError("must be materialized before formal training")
+
+    monkeypatch.setattr(
+        "radfusion.training.train_image.fingerprint_pretrained_weights",
+        missing_weight,
+    )
+    with pytest.raises(FileNotFoundError, match="materialized before formal training"):
+        train_image_experiment(setup.config, tracking_uri=setup.tracking_uri)
+    assert setup.build_calls == []
+    _assert_single_failed_training_without_outputs(setup)
+
+
+def test_pretrained_weight_mutation_cleans_outputs_and_leaves_run_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = _synthetic_image_lifecycle(tmp_path, monkeypatch)
+    observed = iter((setup.weight, replace(setup.weight, sha256="0" * 64)))
+    monkeypatch.setattr(
+        "radfusion.training.train_image.fingerprint_pretrained_weights",
+        lambda weights: next(observed),
+    )
+
+    with pytest.raises(RuntimeError, match="changed during model construction"):
+        train_image_experiment(setup.config, tracking_uri=setup.tracking_uri)
+    _assert_single_failed_training_without_outputs(setup)
+
+
+def test_image_evaluation_rejects_package_and_source_lineage_before_test_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = _synthetic_image_lifecycle(tmp_path, monkeypatch)
+    training = train_image_experiment(setup.config, tracking_uri=setup.tracking_uri)
+    manifest_path = training.model_path.parent / "model_manifest.json"
+    original_manifest = manifest_path.read_bytes()
+    tampered_manifest = json.loads(original_manifest)
+    tampered_manifest["model_package_id"] = "model-package-" + "0" * 64
+    manifest_path.write_text(json.dumps(tampered_manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="package ID"):
+        evaluate_training_run(training.run_id, tracking_uri=setup.tracking_uri)
+    assert setup.adapter.test_calls == 0
+    manifest_path.write_bytes(original_manifest)
+
+    config_archive = training.model_path.parent / "resolved_config.yaml"
+    original_config = config_archive.read_bytes()
+    config_archive.write_bytes(original_config + b"\n# tampered\n")
+    with pytest.raises(ValueError, match="config hash"):
+        evaluate_training_run(training.run_id, tracking_uri=setup.tracking_uri)
+    assert setup.adapter.test_calls == 0
+    config_archive.write_bytes(original_config)
+
+    original_checkpoint = training.model_path.read_bytes()
+    training.model_path.write_bytes(original_checkpoint + b"tampered")
+    with pytest.raises(ValueError, match="checkpoint hash"):
+        evaluate_training_run(training.run_id, tracking_uri=setup.tracking_uri)
+    assert setup.adapter.test_calls == 0
+    training.model_path.write_bytes(original_checkpoint)
+
+    monkeypatch.setattr("radfusion.training.evaluate_image.git_revision", lambda: ("other", False))
+    with pytest.raises(ValueError, match="Git commit"):
+        evaluate_training_run(training.run_id, tracking_uri=setup.tracking_uri)
+    assert setup.adapter.test_calls == 0
+    monkeypatch.setattr(
+        "radfusion.training.evaluate_image.git_revision", lambda: ("commit-test", False)
+    )
+
+    monkeypatch.setattr("radfusion.training.evaluate_image.uv_lock_sha256", lambda: "8" * 64)
+    with pytest.raises(ValueError, match="dependency lock"):
+        evaluate_training_run(training.run_id, tracking_uri=setup.tracking_uri)
+    assert setup.adapter.test_calls == 0
+    monkeypatch.setattr("radfusion.training.evaluate_image.uv_lock_sha256", lambda: "9" * 64)
+
+    client = configure_mlflow(tracking_uri=setup.tracking_uri)
+    source = client.get_run(training.run_id)
+    original_ap = source.data.metrics["validation_average_precision"]
+    client.log_metric(training.run_id, "validation_average_precision", original_ap + 0.01)
+    with pytest.raises(ValueError, match="validation_average_precision"):
+        evaluate_training_run(training.run_id, tracking_uri=setup.tracking_uri)
+    assert setup.adapter.test_calls == 0
+    client.log_metric(training.run_id, "validation_average_precision", original_ap)
+
+    original_size = source.data.metrics["model_size_mib"]
+    client.log_metric(training.run_id, "model_size_mib", original_size + 0.01)
+    with pytest.raises(ValueError, match="model_size_mib"):
+        evaluate_training_run(training.run_id, tracking_uri=setup.tracking_uri)
+    assert setup.adapter.test_calls == 0
+
+
+def test_image_publication_failures_remain_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = _synthetic_image_lifecycle(tmp_path, monkeypatch)
+    training = train_image_experiment(setup.config, tracking_uri=setup.tracking_uri)
+
     def fail_publication(*args, **kwargs):
         raise OSError((args, kwargs))
 
     monkeypatch.setattr("radfusion.training.evaluate_image.publish_directory", fail_publication)
     with pytest.raises(OSError):
-        evaluate_training_run(training.run_id, tracking_uri=tracking_uri)
+        evaluate_training_run(training.run_id, tracking_uri=setup.tracking_uri)
     _, _, rows_after_failure = regenerate_comparison(
-        tracking_uri=tracking_uri,
+        tracking_uri=setup.tracking_uri,
         output_directory=tmp_path / "comparison-after-failure",
     )
-    assert rows_after_failure == 1
-    failed_runs = configure_mlflow(tracking_uri=tracking_uri).search_runs(
-        experiment_ids=[training_run.info.experiment_id],
-    )
+    assert rows_after_failure == 0
+    client = configure_mlflow(tracking_uri=setup.tracking_uri)
+    training_run = client.get_run(training.run_id)
+    failed_runs = client.search_runs(experiment_ids=[training_run.info.experiment_id])
     assert any(
         run.info.status == "FAILED"
         and run.data.tags.get("run_kind") == "test_evaluation"
@@ -1255,8 +1393,8 @@ def test_synthetic_image_training_package_and_separate_evaluation(
 
     monkeypatch.setattr("radfusion.training.train_image.write_run_reports", fail_publication)
     with pytest.raises(OSError):
-        train_image_experiment(config, tracking_uri=tracking_uri)
-    runs_after_training_failure = configure_mlflow(tracking_uri=tracking_uri).search_runs(
+        train_image_experiment(setup.config, tracking_uri=setup.tracking_uri)
+    runs_after_training_failure = client.search_runs(
         experiment_ids=[training_run.info.experiment_id],
     )
     failed_training = next(
@@ -1267,10 +1405,12 @@ def test_synthetic_image_training_package_and_separate_evaluation(
         and run.info.run_id != training.run_id
     )
     assert failed_training.data.tags.get("run_complete") == "false"
-    assert not (config.training.model_directory / "runs" / failed_training.info.run_id).exists()
     assert not (
-        config.training.report_directory
-        / config.dataset.registry_key
+        setup.config.training.model_directory / "runs" / failed_training.info.run_id
+    ).exists()
+    assert not (
+        setup.config.training.report_directory
+        / setup.config.dataset.registry_key
         / "runs"
         / failed_training.info.run_id
     ).exists()

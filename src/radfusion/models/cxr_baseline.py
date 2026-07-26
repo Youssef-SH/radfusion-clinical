@@ -16,7 +16,7 @@ from radfusion.training.config import ModelConfig
 
 @dataclass(frozen=True)
 class PretrainedWeightIdentity:
-    """Authenticated identity of one materialized upstream encoder checkpoint."""
+    """Local byte identity of one materialized pretrained weight file."""
 
     declared_name: str
     stable_identifier: str
@@ -164,10 +164,10 @@ class ImageDenseNetModel:
         )
 
 
-def authenticate_pretrained_weights(
+def fingerprint_pretrained_weights(
     weights: str = "densenet121-res224-chex",
 ) -> PretrainedWeightIdentity:
-    """Authenticate the exact local TorchXRayVision checkpoint for a declared weight name."""
+    """Fingerprint the local TorchXRayVision weight file for a declared weight name."""
     import torchxrayvision as xrv
 
     try:
@@ -178,8 +178,16 @@ def authenticate_pretrained_weights(
     if not cache_filename:
         raise ValueError("TorchXRayVision weight URL does not name a cache file")
     cache_path = Path(xrv.utils.get_cache_dir()).expanduser() / cache_filename
-    if not cache_path.is_file() or cache_path.is_symlink():
-        raise FileNotFoundError(f"Materialized pretrained weight file is missing: {cache_filename}")
+    if cache_path.is_symlink():
+        raise ValueError(
+            f"Pretrained weight file must be a regular non-symlink file: {cache_filename}"
+        )
+    if not cache_path.exists():
+        raise FileNotFoundError(
+            f"Pretrained weight file must be materialized before formal training: {cache_filename}"
+        )
+    if not cache_path.is_file():
+        raise ValueError(f"Pretrained weight path must be a regular file: {cache_filename}")
     return PretrainedWeightIdentity(
         declared_name=weights,
         stable_identifier=stable_identifier,

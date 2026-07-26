@@ -14,6 +14,7 @@ def test_supported_configs_load_as_immutable_typed_values() -> None:
     logistic = load_experiment_config("configs/metadata_logistic.yaml")
     lightgbm = load_experiment_config("configs/metadata_lightgbm.yaml")
 
+    assert logistic.config_version == lightgbm.config_version == 1
     assert logistic.dataset.registry_key == "rsna"
     assert logistic.dataset.bundle_id.startswith("build-")
     assert logistic.model.registry_key == "metadata_logistic"
@@ -39,6 +40,16 @@ def test_invalid_config_fails_before_execution(tmp_path: Path) -> None:
         load_experiment_config(path)
 
 
+def test_unsupported_config_version_is_rejected(tmp_path: Path) -> None:
+    document = yaml.safe_load(Path("configs/metadata_logistic.yaml").read_text(encoding="utf-8"))
+    document["config_version"] = 0
+    path = tmp_path / "unsupported-version.yaml"
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="Unsupported config_version"):
+        load_experiment_config(path)
+
+
 def test_unknown_config_fields_are_rejected(tmp_path: Path) -> None:
     content = Path("configs/metadata_logistic.yaml").read_text(encoding="utf-8")
     path = tmp_path / "unknown.yaml"
@@ -52,7 +63,10 @@ def test_unknown_nested_config_fields_are_rejected(tmp_path: Path) -> None:
     content = Path("configs/metadata_logistic.yaml").read_text(encoding="utf-8")
     path = tmp_path / "unknown-nested.yaml"
     path.write_text(
-        content.replace("  task_id: pneumonia", "  task_id: pneumonia\n  silent: no"),
+        content.replace(
+            "  task_id: pneumonia",
+            "  task_id: pneumonia\n  unexpected_field: true",
+        ),
         encoding="utf-8",
     )
 
