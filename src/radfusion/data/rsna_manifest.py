@@ -11,6 +11,14 @@ from pathlib import Path
 from radfusion.data.rsna_artifacts import build_rsna_artifacts, write_bundle
 from radfusion.data.rsna_source import ManifestBuildError
 from radfusion.data.splitting import SplitConfig
+from radfusion.utils.operational_logging import (
+    add_logging_argument,
+    configure_logging,
+    get_operational_logger,
+    timed_phase,
+)
+
+_LOGGER = get_operational_logger(__name__)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -46,11 +54,13 @@ def _parser() -> argparse.ArgumentParser:
         default=0.15,
         help="Test patient ratio",
     )
+    add_logging_argument(parser)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    configure_logging(args.log_level)
     try:
         split_config = SplitConfig(
             seed=args.split_seed,
@@ -58,8 +68,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             validation_ratio=args.validation_ratio,
             test_ratio=args.test_ratio,
         )
-        result = build_rsna_artifacts(args.dataset_root, split_config)
-        written = write_bundle(result, args.output_directory)
+        with timed_phase(_LOGGER, "manifest_construction"):
+            result = build_rsna_artifacts(args.dataset_root, split_config)
+        with timed_phase(_LOGGER, "bundle_publication"):
+            written = write_bundle(result, args.output_directory)
     except (ManifestBuildError, OSError) as exc:
         print(f"RSNA manifest build failed: {exc}", file=sys.stderr)
         return 1

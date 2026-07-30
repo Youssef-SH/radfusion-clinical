@@ -21,7 +21,10 @@ from radfusion.training.config import (
 )
 from radfusion.training.datasets import RsnaImageDataset
 from radfusion.training.device import resolve_device
-from radfusion.training.neural import build_evaluation_loader, deterministic_inference
+from radfusion.training.neural import (
+    build_evaluation_loader,
+    deterministic_inference,
+)
 from radfusion.training.registry import get_dataset, get_model
 from radfusion.training.train_tabular import (
     metrics_document,
@@ -42,8 +45,16 @@ from radfusion.utils.neural_publication import (
     strict_load_checkpoint,
     validate_neural_package_metadata,
 )
+from radfusion.utils.operational_logging import (
+    CountProgress,
+    get_operational_logger,
+    log_event,
+    timed_phase,
+)
 from radfusion.utils.privacy import validate_public_reports
 from radfusion.utils.publication import publish_directory, staging_directory
+
+_LOGGER = get_operational_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -95,6 +106,7 @@ def evaluate_image_training_run(
             **environment,
         },
     ) as evaluation_run_id:
+        context = {"run_id": evaluation_run_id, "model": initial_tags["model"]}
         if (
             source_run.info.status != "FINISHED"
             or source_run.data.tags.get("run_kind") != "training"
@@ -122,11 +134,13 @@ def evaluate_image_training_run(
         if not isinstance(model, nn.Module):
             raise TypeError("Registered image model builder must return torch.nn.Module")
         strict_load_checkpoint(model, checkpoint)
+        log_event(_LOGGER, "training_package_verified", **context)
         dataset_adapter = get_dataset(config.dataset.registry_key)
-        image_data = dataset_adapter.load_image_test(
-            config.dataset,
-            expected_manifest_sha256=manifest["bundle_manifest_sha256"],
-        )
+        with timed_phase(_LOGGER, "dataset_loading", **context):
+            image_data = dataset_adapter.load_image_test(
+                config.dataset,
+                expected_manifest_sha256=manifest["bundle_manifest_sha256"],
+            )
         authentication = image_data.authentication
         if (
             image_data.lineage.bundle_id != manifest["bundle_id"]
@@ -167,7 +181,28 @@ def evaluate_image_training_run(
             runtime=runtime,
         )
         model.to(runtime.device)
-        inference = deterministic_inference(model, test_loader, runtime=runtime)
+        with timed_phase(_LOGGER, "test_inference", **context):
+            inference_progress: CountProgress | None = None
+
+            def report_inference_progress(completed: int, total: int) -> None:
+                nonlocal inference_progress
+                if inference_progress is None:
+                    inference_progress = CountProgress(
+                        _LOGGER,
+                        "inference_progress",
+                        total=total,
+                        unit="batches",
+                        count_interval=100,
+                        fields={"partition": "test", **context},
+                    )
+                inference_progress.update(completed)
+
+            inference = deterministic_inference(
+                model,
+                test_loader,
+                runtime=runtime,
+                progress_callback=report_inference_progress,
+            )
         thresholds = {key: float(value) for key, value in manifest["thresholds"].items()}
         probability_metrics = evaluate_probabilities(
             inference.targets,
@@ -285,6 +320,7 @@ def evaluate_image_training_run(
         finally:
             if report_stage.exists():
                 shutil.rmtree(report_stage)
+        log_event(_LOGGER, "publication_completed", artifact="test_report", **context)
     return ImageTestEvaluationResult(
         run_id=evaluation_run_id,
         training_run_id=training_run_id,

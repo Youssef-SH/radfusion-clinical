@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import subprocess
 from pathlib import Path
@@ -36,6 +37,7 @@ from radfusion.utils.model_publication import (
     threshold_contract,
     validate_published_model,
 )
+from radfusion.utils.operational_logging import configure_logging
 
 _SHA256 = "a" * 64
 
@@ -145,6 +147,8 @@ def test_train_then_explicit_test_evaluation_uses_separate_partitions_and_runs(
     monkeypatch: pytest.MonkeyPatch,
     filename: str,
 ) -> None:
+    log_stream = io.StringIO()
+    configure_logging("INFO", stream=log_stream)
     data, _ = _install_dataset(monkeypatch)
     _fixed_provenance(monkeypatch)
     config = _config(tmp_path, filename=filename)
@@ -215,11 +219,73 @@ def test_train_then_explicit_test_evaluation_uses_separate_partitions_and_runs(
         )
     )
     assert resolved_config.read_bytes() == config.source_bytes
+    log_lines = log_stream.getvalue().splitlines()
+    training_run_started = next(
+        index
+        for index, line in enumerate(log_lines)
+        if "event=run_started" in line and f"run_id={training.run_id}" in line
+    )
+    dataset_phase_started = next(
+        index
+        for index, line in enumerate(log_lines)
+        if "event=phase_started" in line
+        and "phase=dataset_loading" in line
+        and f"run_id={training.run_id}" in line
+    )
+    dataset_phase_completed = next(
+        index
+        for index, line in enumerate(log_lines)
+        if "event=phase_completed" in line
+        and "phase=dataset_loading" in line
+        and f"run_id={training.run_id}" in line
+    )
+    package_publication = next(
+        index
+        for index, line in enumerate(log_lines)
+        if "event=publication_completed" in line
+        and "artifact=model_package" in line
+        and f"run_id={training.run_id}" in line
+    )
+    validation_publication = next(
+        index
+        for index, line in enumerate(log_lines)
+        if "event=publication_completed" in line
+        and "artifact=validation_report" in line
+        and f"run_id={training.run_id}" in line
+    )
+    test_publication = next(
+        index
+        for index, line in enumerate(log_lines)
+        if "event=publication_completed" in line
+        and "artifact=test_report" in line
+        and f"run_id={evaluation.run_id}" in line
+    )
+    training_run_finished = next(
+        index
+        for index, line in enumerate(log_lines)
+        if "event=run_finished" in line and f"run_id={training.run_id}" in line
+    )
+    assert (
+        training_run_started
+        < dataset_phase_started
+        < dataset_phase_completed
+        < package_publication
+        < validation_publication
+        < training_run_finished
+    )
+    evaluation_run_finished = next(
+        index
+        for index, line in enumerate(log_lines)
+        if "event=run_finished" in line and f"run_id={evaluation.run_id}" in line
+    )
+    assert test_publication < evaluation_run_finished
 
 
 def test_fit_failure_leaves_failed_mlflow_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    log_stream = io.StringIO()
+    configure_logging("INFO", stream=log_stream)
     _install_dataset(monkeypatch)
     _fixed_provenance(monkeypatch)
     config = _config(tmp_path)
@@ -239,6 +305,9 @@ def test_fit_failure_leaves_failed_mlflow_run(
     run = runs[0]
     assert run.info.status == "FAILED"
     assert run.data.tags["run_complete"] != "true"
+    assert "level=ERROR event=run_failed" in log_stream.getvalue()
+    assert "error_type=RuntimeError" in log_stream.getvalue()
+    assert "event=run_finished" not in log_stream.getvalue()
     assert run.data.tags["split_assignment_id"] == "assignment-synthetic"
     assert run.data.tags["label_policy_version"] == "label-synthetic"
     downloaded = Path(
@@ -249,6 +318,42 @@ def test_fit_failure_leaves_failed_mlflow_run(
         )
     )
     assert downloaded.read_bytes() == config.source_bytes
+
+
+def test_run_start_precedes_post_creation_mlflow_metadata_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_stream = io.StringIO()
+    configure_logging("INFO", stream=log_stream)
+    _install_dataset(monkeypatch)
+    _fixed_provenance(monkeypatch)
+    config = _config(tmp_path)
+    monkeypatch.setattr(
+        "radfusion.utils.mlflow_utils.mlflow.set_tag",
+        lambda key, value: (_ for _ in ()).throw(RuntimeError(f"metadata failed: {key}={value}")),
+    )
+
+    with pytest.raises(RuntimeError, match="metadata failed"):
+        _train(config, tmp_path)
+
+    runs = _client(tmp_path).search_runs(
+        [mlflow.get_experiment_by_name(config.mlflow.experiment_name).experiment_id]
+    )
+    assert len(runs) == 1
+    run_id = runs[0].info.run_id
+    lines = log_stream.getvalue().splitlines()
+    started = next(
+        index
+        for index, line in enumerate(lines)
+        if "event=run_started" in line and f"run_id={run_id}" in line
+    )
+    failed = next(
+        index
+        for index, line in enumerate(lines)
+        if "event=run_failed" in line and f"run_id={run_id}" in line
+    )
+    assert started < failed
+    assert runs[0].info.status == "FAILED"
 
 
 def test_required_model_publication_failure_leaves_failed_mlflow_run(

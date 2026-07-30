@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import mlflow
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -66,6 +68,7 @@ from radfusion.utils.neural_publication import (
     validate_neural_package_metadata,
     validate_published_neural_model,
 )
+from radfusion.utils.operational_logging import configure_logging
 
 
 class _TensorDataset(Dataset[dict[str, object]]):
@@ -143,13 +146,28 @@ def test_deterministic_loaders_class_weight_and_two_stage_training() -> None:
     assert training_class_weight(np.array([0, 0, 1])) == (1, 2, 2.0)
 
     model = _TinyImageModel()
+    epochs = []
+    epoch_starts = []
+    stages = []
     fit = fit_image_model(
         model,
         build_image_loaders(train, validation, config=_image_config(), runtime=_runtime(), seed=17),
         config=_image_config(),
         runtime=_runtime(),
         pos_weight=1.0,
+        epoch_callback=epochs.append,
+        epoch_started_callback=lambda stage, global_epoch, stage_epoch: epoch_starts.append(
+            (stage, global_epoch, stage_epoch)
+        ),
+        stage_callback=lambda stage, count: stages.append((stage, count)),
     )
+    assert tuple(epochs) == fit.history
+    assert epoch_starts == [
+        ("warmup", 1, 1),
+        ("fine_tune", 2, 1),
+        ("fine_tune", 3, 2),
+    ]
+    assert stages == [("warmup", 1), ("fine_tune", 2)]
     assert fit.history[0].stage == "warmup"
     assert any(record.stage == "fine_tune" for record in fit.history)
     assert fit.selected_stage in {"warmup", "fine_tune"}
@@ -161,13 +179,34 @@ def test_repeated_tiny_training_is_deterministic() -> None:
     dataset = _TensorDataset([0, 1, 0, 1, 0])
     config = replace(_image_config(), batch_size=3, warmup_epochs=1, fine_tune_epochs=1)
     results = []
-    for _ in range(2):
+    observations: list[tuple[object, ...]] = []
+
+    def observe(*args: object) -> None:
+        observations.append(args)
+
+    for index in range(2):
         seed_neural_runtime(42)
         model = _TinyImageModel()
         loaders = build_image_loaders(dataset, dataset, config=config, runtime=_runtime(), seed=42)
+        callbacks = {}
+        if index == 1:
+            callbacks = {
+                "stage_callback": observe,
+                "epoch_started_callback": observe,
+                "epoch_callback": observe,
+                "progress_callback": observe,
+            }
         results.append(
-            fit_image_model(model, loaders, config=config, runtime=_runtime(), pos_weight=1.5)
+            fit_image_model(
+                model,
+                loaders,
+                config=config,
+                runtime=_runtime(),
+                pos_weight=1.5,
+                **callbacks,
+            )
         )
+    assert observations
 
     first, second = results
     assert first.history == second.history
@@ -533,6 +572,26 @@ def test_inference_rejects_non_finite_logits() -> None:
         deterministic_inference(model, loader, runtime=_runtime())
 
 
+def test_inference_progress_does_not_require_a_sized_loader() -> None:
+    batch = {
+        "image": torch.ones((2, 2), dtype=torch.float32),
+        "target": torch.tensor([0.0, 1.0]),
+        "sample_id": ["a", "b"],
+        "patient_id": ["p-a", "p-b"],
+    }
+    progress: list[tuple[int, int]] = []
+
+    result = deterministic_inference(
+        _TinyImageModel(),
+        iter([batch]),
+        runtime=_runtime(),
+        progress_callback=lambda completed, total: progress.append((completed, total)),
+    )
+
+    assert result.targets.tolist() == [0, 1]
+    assert progress == []
+
+
 @pytest.mark.parametrize(
     "target",
     [
@@ -565,6 +624,8 @@ def test_inference_rejects_identifier_length_mismatch() -> None:
 
 
 def test_partition_source_authentication_is_exact_and_deterministic(tmp_path: Path) -> None:
+    log_stream = io.StringIO()
+    configure_logging("INFO", stream=log_stream)
     config = load_experiment_config("configs/image_densenet.yaml").dataset
     root = tmp_path / "raw"
     image_directory = root / "images"
@@ -633,6 +694,11 @@ def test_partition_source_authentication_is_exact_and_deterministic(tmp_path: Pa
     assert first.file_count == 2
     assert first.success is True
     assert first.source_inventory_arrow_sha256 == inventory_hash
+    log_output = log_stream.getvalue()
+    assert "event=source_authentication_progress" in log_output
+    assert not any(value in log_output for value in frame["sample_id"])
+    assert not any(value in log_output for value in frame["patient_id"])
+    assert not any(value in log_output for value in frame["image_path"])
 
     train_path = image_directory / "train.dcm"
     original_bytes = train_path.read_bytes()
@@ -1202,6 +1268,31 @@ def _assert_single_failed_training_without_outputs(setup: _SyntheticImageLifecyc
     ).exists()
 
 
+def test_image_training_progress_accepts_unsized_validation_loader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = _synthetic_image_lifecycle(tmp_path, monkeypatch)
+
+    class UnsizedLoader:
+        def __init__(self, loader) -> None:
+            self.loader = loader
+
+        def __iter__(self):
+            return iter(self.loader)
+
+    def unsized_validation_loader(*args, **kwargs):
+        loaders = build_image_loaders(*args, **kwargs)
+        return type(loaders)(loaders.train, UnsizedLoader(loaders.validation))
+
+    monkeypatch.setattr(
+        "radfusion.training.train_image.build_image_loaders", unsized_validation_loader
+    )
+
+    result = train_image_experiment(setup.config, tracking_uri=setup.tracking_uri)
+
+    assert result.model_path.is_file()
+
+
 def test_synthetic_image_training_package_and_separate_evaluation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1414,3 +1505,27 @@ def test_image_publication_failures_remain_incomplete(
         / "runs"
         / failed_training.info.run_id
     ).exists()
+
+
+def test_image_rollback_failure_path_has_no_final_publication_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = _synthetic_image_lifecycle(tmp_path, monkeypatch)
+    log_stream = io.StringIO()
+    configure_logging("INFO", stream=log_stream)
+    original_set_tags = mlflow.set_tags
+
+    def fail_after_publication(tags):
+        if "local_model_path" in tags:
+            raise RuntimeError("post-publication metadata failed")
+        original_set_tags(tags)
+
+    monkeypatch.setattr("radfusion.training.train_image.mlflow.set_tags", fail_after_publication)
+
+    with pytest.raises(RuntimeError, match="post-publication metadata failed"):
+        train_image_experiment(setup.config, tracking_uri=setup.tracking_uri)
+
+    _assert_single_failed_training_without_outputs(setup)
+    output = log_stream.getvalue()
+    assert "event=publication_completed" not in output
+    assert "event=run_failed" in output

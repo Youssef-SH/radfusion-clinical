@@ -164,6 +164,10 @@ MLflow records exact loaded training configs, resolved parameters, scalar metric
 lineage, completion state, and project-output references. Linked test runs add evaluator
 provenance, test metrics, and their source package and training-run relationship.
 
+Operational logs describe the current execution and may contain environment-dependent elapsed
+times and heartbeat timing. They are not inputs to reproducibility, provenance, MLflow lineage,
+bundle identity, or model package identity.
+
 ## Quality gates
 
 ```bash

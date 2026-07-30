@@ -32,9 +32,11 @@ from radfusion.data.tabular_preprocess import SOURCE_FEATURES
 from radfusion.evaluation.metrics import validated_binary_targets
 from radfusion.training.config import DatasetConfig
 from radfusion.training.interfaces import DatasetLineage, DatasetPartition, DatasetRunData
+from radfusion.utils.operational_logging import CountProgress, get_operational_logger, log_event
 
 _IMAGE_FRAME_COLUMNS = ("sample_id", "patient_id", "image_path", "split_name", "target")
 SOURCE_AUTHENTICATION_POLICY_VERSION = "partition-inventory-sha256-v1"
+_LOGGER = get_operational_logger(__name__)
 
 
 class ImageSample(TypedDict):
@@ -420,9 +422,26 @@ def _authenticate_source_rows(
     ):
         raise ManifestBuildError("Source inventory does not provide one row per permitted image")
     rows = inventory.sort_values("sample_id", kind="stable").to_dict(orient="records")
+    log_event(
+        _LOGGER,
+        "source_authentication_started",
+        partition_count=len(partitions),
+        total=len(rows),
+        unit="files",
+    )
+    progress = (
+        CountProgress(
+            _LOGGER,
+            "source_authentication_progress",
+            total=len(rows),
+            unit="files",
+        )
+        if rows
+        else None
+    )
     expected_paths = dict(zip(frame["sample_id"], frame["image_path"], strict=True))
     canonical_rows: list[dict[str, object]] = []
-    for row in rows:
+    for completed, row in enumerate(rows, start=1):
         relative = _validated_image_path(row["relative_path"])
         if relative.as_posix() != expected_paths[row["sample_id"]]:
             raise ManifestBuildError("Source inventory path differs from the permitted image row")
@@ -448,6 +467,8 @@ def _authenticate_source_rows(
                 "sha256": digest,
             }
         )
+        if progress is not None:
+            progress.update(completed)
     hashes = metadata.get("generated_artifact_hashes")
     declared = hashes.get(SOURCE_INVENTORY_FILENAME) if isinstance(hashes, dict) else None
     if not isinstance(declared, dict):
@@ -462,7 +483,7 @@ def _authenticate_source_rows(
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    return SourceAuthentication(
+    result = SourceAuthentication(
         policy_version=SOURCE_AUTHENTICATION_POLICY_VERSION,
         partitions=partitions,
         file_count=len(canonical_rows),
@@ -470,6 +491,14 @@ def _authenticate_source_rows(
         source_inventory_file_sha256=file_hash,
         authenticated_rows_sha256=hashlib.sha256(encoded).hexdigest(),
     )
+    log_event(
+        _LOGGER,
+        "source_authentication_completed",
+        partition_count=len(partitions),
+        total=result.file_count,
+        unit="files",
+    )
+    return result
 
 
 def _lineage(

@@ -60,6 +60,10 @@ make inspect FILE=path/to/image.dcm
 `models/`, generated reports under `reports/`, MLflow metadata in `mlflow.db`, and small MLflow
 training-configuration artifacts under `mlartifacts/`.
 
+Instrumented manifest, audit, training, evaluation, and comparison commands emit operational
+records to stderr while preserving machine-readable stdout; see the training guide for capture
+examples.
+
 Every executable experiment is declared by a validated YAML file under `configs/`. See
 [`docs/training.md`](docs/training.md) for the training workflow.
 

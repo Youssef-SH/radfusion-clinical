@@ -16,6 +16,7 @@ from radfusion.training.registry import RegistryError
 from radfusion.training.train_image import train_image_experiment
 from radfusion.training.train_tabular import train_configured_experiment
 from radfusion.utils.mlflow_utils import DEFAULT_TRACKING_URI
+from radfusion.utils.operational_logging import add_logging_argument, configure_logging
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -26,12 +27,14 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_TRACKING_URI,
         help="MLflow SQLite tracking URI",
     )
+    add_logging_argument(parser)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Load one config, execute it, and print aggregate run lineage."""
     args = _parser().parse_args(argv)
+    configure_logging(args.log_level)
     try:
         config = load_experiment_config(args.config)
         if not config.executable:

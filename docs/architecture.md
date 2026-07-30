@@ -44,6 +44,9 @@ Model packages under `models/` and complete reports under `reports/` are the aut
 physical outputs. MLflow stores the run ledger and references to those outputs; see
 [`training.md`](training.md) for the experiment artifact contract.
 
+Operational records are transient and do not participate in scientific state, MLflow records,
+published artifacts, or semantic identities.
+
 ## Data flow
 
 ```text
