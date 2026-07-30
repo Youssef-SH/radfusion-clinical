@@ -134,6 +134,21 @@ cache, and strictly loads the complete state before reading or authenticating te
 
 ## Tracking and outputs
 
+### Operational progress
+
+Instrumented entrypoints emit lifecycle records and rate-limited aggregate progress to stderr;
+their final machine-readable result remains on stdout. A narrow field allowlist and bounded value
+validation limit operational content. Use `--log-level` to control detail. Operational logs are
+transient; MLflow remains the durable experiment ledger.
+
+```bash
+# Combined transcript
+command 2>&1 | tee run.log
+
+# Bash: retain stderr logs while preserving clean stdout
+command 2> >(tee run.log >&2)
+```
+
 Model packages under `models/` and complete reports under `reports/` are the authoritative
 physical outputs. MLflow stores the run ledger, status, parameters, scalar metrics, provenance,
 lineage, completion state, references to project-owned outputs, and the exact loaded training

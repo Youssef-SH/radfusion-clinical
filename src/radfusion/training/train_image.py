@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -29,6 +30,7 @@ from radfusion.training.device import resolve_device
 from radfusion.training.interfaces import ImageModelImplementation
 from radfusion.training.neural import (
     CLASS_WEIGHT_POLICY_VERSION,
+    EpochRecord,
     NeuralFitResult,
     build_image_loaders,
     deterministic_inference,
@@ -60,11 +62,18 @@ from radfusion.utils.neural_publication import (
     save_neural_checkpoint,
     strict_load_checkpoint,
 )
+from radfusion.utils.operational_logging import (
+    CountProgress,
+    get_operational_logger,
+    log_event,
+    timed_phase,
+)
 from radfusion.utils.privacy import validate_public_reports
 from radfusion.utils.publication import publish_directory, staging_directory
 
 NEURAL_METRICS_POLICY_VERSION = "binary-probability-and-frozen-operating-points-v1"
 NEURAL_THRESHOLD_POLICY_VERSION = "validation-frozen-thresholds-v1"
+_LOGGER = get_operational_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -132,8 +141,10 @@ def train_image_experiment(
         parameters=initial_parameters,
     ) as run_id:
         log_source_config(config)
+        context = {"run_id": run_id, "model": config.model.registry_key}
         dataset_adapter = get_dataset(config.dataset.registry_key)
-        image_data = dataset_adapter.load_image_train_validation(config.dataset)
+        with timed_phase(_LOGGER, "dataset_loading", **context):
+            image_data = dataset_adapter.load_image_train_validation(config.dataset)
         authentication = image_data.authentication
         mlflow.set_tags(
             {
@@ -144,57 +155,183 @@ def train_image_experiment(
             }
         )
         mlflow.log_param("bundle_manifest_sha256", image_data.bundle_manifest_sha256)
-        seed_neural_runtime(config.training.seed)
-        train_transform = _transform(config, training=True)
-        evaluation_transform = _transform(config, training=False)
-        train_dataset = RsnaImageDataset(
-            image_data.train,
-            dataset_root=_required_dataset_root(config),
-            partition="train",
-            transform=train_transform,
-        )
-        validation_dataset = RsnaImageDataset(
-            image_data.validation,
-            dataset_root=_required_dataset_root(config),
-            partition="validation",
-            transform=evaluation_transform,
-        )
-        runtime = resolve_device(
-            config.image.device,
-            mixed_precision=config.image.mixed_precision,
-            pin_memory_policy=config.image.pin_memory_policy,
-        )
-        loaders = build_image_loaders(
-            train_dataset,
-            validation_dataset,
-            config=config.image,
-            runtime=runtime,
-            seed=config.training.seed,
-        )
-        train_targets = image_data.train["target"].to_numpy(dtype=np.int8)
-        positive_count, negative_count, pos_weight = training_class_weight(train_targets)
+        with timed_phase(_LOGGER, "image_runtime_preparation", **context):
+            seed_neural_runtime(config.training.seed)
+            train_transform = _transform(config, training=True)
+            evaluation_transform = _transform(config, training=False)
+            train_dataset = RsnaImageDataset(
+                image_data.train,
+                dataset_root=_required_dataset_root(config),
+                partition="train",
+                transform=train_transform,
+            )
+            validation_dataset = RsnaImageDataset(
+                image_data.validation,
+                dataset_root=_required_dataset_root(config),
+                partition="validation",
+                transform=evaluation_transform,
+            )
+            runtime = resolve_device(
+                config.image.device,
+                mixed_precision=config.image.mixed_precision,
+                pin_memory_policy=config.image.pin_memory_policy,
+            )
+            log_event(_LOGGER, "device_resolved", device=runtime.device.type, **context)
+            loaders = build_image_loaders(
+                train_dataset,
+                validation_dataset,
+                config=config.image,
+                runtime=runtime,
+                seed=config.training.seed,
+            )
+            train_targets = image_data.train["target"].to_numpy(dtype=np.int8)
+            positive_count, negative_count, pos_weight = training_class_weight(train_targets)
         model_builder = cast(ImageModelImplementation, get_model(config.model.registry_key))
-        weight_identity = fingerprint_pretrained_weights(str(config.model.parameters["weights"]))
-        model = model_builder.build(config.model)
-        if (
-            fingerprint_pretrained_weights(str(config.model.parameters["weights"]))
-            != weight_identity
-        ):
-            raise RuntimeError("Pretrained weight file changed during model construction")
-        if not isinstance(model, nn.Module):
-            raise TypeError("Registered image model builder must return torch.nn.Module")
-        model.to(runtime.device)
-        fit = fit_image_model(
-            model,
-            loaders,
-            config=config.image,
-            runtime=runtime,
-            pos_weight=pos_weight,
+        with timed_phase(_LOGGER, "model_construction", **context):
+            weight_identity = fingerprint_pretrained_weights(
+                str(config.model.parameters["weights"])
+            )
+            model = model_builder.build(config.model)
+            if (
+                fingerprint_pretrained_weights(str(config.model.parameters["weights"]))
+                != weight_identity
+            ):
+                raise RuntimeError("Pretrained weight file changed during model construction")
+            if not isinstance(model, nn.Module):
+                raise TypeError("Registered image model builder must return torch.nn.Module")
+            model.to(runtime.device)
+        log_event(_LOGGER, "pretrained_weight_fingerprint_stable", **context)
+
+        epoch_started_at = time.perf_counter()
+
+        def stage_started(stage: str, planned_epochs: int) -> None:
+            log_event(
+                _LOGGER,
+                "training_stage_started",
+                stage=stage,
+                planned_epochs=planned_epochs,
+                **context,
+            )
+
+        def epoch_started(stage: str, global_epoch: int, stage_epoch: int) -> None:
+            nonlocal epoch_started_at
+            epoch_started_at = time.perf_counter()
+            log_event(
+                _LOGGER,
+                "epoch_started",
+                stage=stage,
+                global_epoch=global_epoch,
+                stage_epoch=stage_epoch,
+                **context,
+            )
+
+        def epoch_completed(record: EpochRecord) -> None:
+            nonlocal epoch_started_at
+            now = time.perf_counter()
+            log_event(
+                _LOGGER,
+                "epoch_completed",
+                stage=record.stage,
+                global_epoch=record.global_epoch,
+                stage_epoch=record.stage_epoch,
+                training_loss=record.training_loss,
+                validation_average_precision=record.validation_average_precision,
+                selected_best=record.selected_best,
+                encoder_learning_rate=record.encoder_learning_rate,
+                head_learning_rate=record.head_learning_rate,
+                no_improvement_count=record.no_improvement_count,
+                elapsed_s=now - epoch_started_at,
+                **context,
+            )
+            epoch_started_at = now
+            if (
+                record.stage == "fine_tune"
+                and not record.selected_best
+                and record.no_improvement_count >= config.image.early_stopping_patience
+            ):
+                log_event(
+                    _LOGGER,
+                    "early_stopping_triggered",
+                    stage=record.stage,
+                    global_epoch=record.global_epoch,
+                    patience=config.image.early_stopping_patience,
+                    **context,
+                )
+
+        operation_progress: dict[tuple[str, str, int], CountProgress] = {}
+
+        def neural_progress(
+            operation: str,
+            stage: str,
+            global_epoch: int,
+            completed: int,
+            total: int,
+        ) -> None:
+            key = (operation, stage, global_epoch)
+            reporter = operation_progress.get(key)
+            if reporter is None and total > 0:
+                reporter = CountProgress(
+                    _LOGGER,
+                    "neural_operation_progress",
+                    total=total,
+                    unit="batches",
+                    count_interval=100,
+                    fields={
+                        "operation": operation,
+                        "stage": stage,
+                        "global_epoch": global_epoch,
+                        **context,
+                    },
+                )
+                operation_progress[key] = reporter
+            if reporter is not None:
+                reporter.update(completed)
+
+        with timed_phase(_LOGGER, "image_training", **context):
+            fit = fit_image_model(
+                model,
+                loaders,
+                config=config.image,
+                runtime=runtime,
+                pos_weight=pos_weight,
+                epoch_callback=epoch_completed,
+                epoch_started_callback=epoch_started,
+                stage_callback=stage_started,
+                progress_callback=neural_progress,
+            )
+        log_event(
+            _LOGGER,
+            "checkpoint_selected",
+            selected_epoch=fit.selected_epoch,
+            selected_stage=fit.selected_stage,
+            validation_average_precision=fit.selected_validation_average_precision,
+            **context,
         )
         model.load_state_dict(fit.selected_state_dict, strict=True)
         model.to(runtime.device)
         model.eval()
-        final_validation = deterministic_inference(model, loaders.validation, runtime=runtime)
+        with timed_phase(_LOGGER, "validation_inference", **context):
+            validation_progress: CountProgress | None = None
+
+            def report_validation_progress(completed: int, total: int) -> None:
+                nonlocal validation_progress
+                if validation_progress is None:
+                    validation_progress = CountProgress(
+                        _LOGGER,
+                        "inference_progress",
+                        total=total,
+                        unit="batches",
+                        count_interval=100,
+                        fields={"partition": "validation", **context},
+                    )
+                validation_progress.update(completed)
+
+            final_validation = deterministic_inference(
+                model,
+                loaders.validation,
+                runtime=runtime,
+                progress_callback=report_validation_progress,
+            )
         if not math.isclose(
             final_validation.average_precision,
             fit.selected_validation_average_precision,
@@ -392,6 +529,8 @@ def train_image_experiment(
             shutil.rmtree(temporary_model_root, ignore_errors=True)
         if published is None:
             raise RuntimeError("Image training completed without a published package")
+        log_event(_LOGGER, "publication_completed", artifact="model_package", **context)
+        log_event(_LOGGER, "publication_completed", artifact="validation_report", **context)
     return ImageModelResult(
         model_name=config.model.registry_key,
         run_id=run_id,

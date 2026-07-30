@@ -15,6 +15,14 @@ from mlflow.exceptions import MlflowException
 from sqlalchemy.exc import SQLAlchemyError
 
 from radfusion.utils.mlflow_utils import DEFAULT_TRACKING_URI, configure_mlflow
+from radfusion.utils.operational_logging import (
+    add_logging_argument,
+    configure_logging,
+    get_operational_logger,
+    timed_phase,
+)
+
+_LOGGER = get_operational_logger(__name__)
 
 COMPARISON_COLUMNS = (
     "run_id",
@@ -103,51 +111,52 @@ def regenerate_comparison(
     output_directory: str | Path = "reports",
 ) -> tuple[Path, Path, int]:
     """Write deterministic CSV and Markdown views from complete MLflow runs."""
-    client = configure_mlflow(tracking_uri=tracking_uri)
-    experiment_ids = [item.experiment_id for item in client.search_experiments()]
-    runs = (
-        client.search_runs(
-            experiment_ids=experiment_ids,
-            filter_string="attributes.status = 'FINISHED'",
-            max_results=50_000,
+    with timed_phase(_LOGGER, "comparison_generation"):
+        client = configure_mlflow(tracking_uri=tracking_uri)
+        experiment_ids = [item.experiment_id for item in client.search_experiments()]
+        runs = (
+            client.search_runs(
+                experiment_ids=experiment_ids,
+                filter_string="attributes.status = 'FINISHED'",
+                max_results=50_000,
+            )
+            if experiment_ids
+            else []
         )
-        if experiment_ids
-        else []
-    )
-    candidates = []
-    for run in runs:
-        if record := _comparison_record(run):
-            candidates.append(record)
-    training = {
-        record["run_id"]: record
-        for record in candidates
-        if record["evaluation_scope"] == "validation"
-    }
-    records = [
-        record
-        for record in candidates
-        if (record["evaluation_scope"] == "validation" and record["modality"] == "metadata")
-        or _has_matching_training_parent(record, training)
-    ]
-    records.sort(
-        key=lambda item: (
-            item["experiment_name"],
-            item["model"],
-            item["evaluation_scope"],
-            item["run_id"],
+        candidates = []
+        for run in runs:
+            if record := _comparison_record(run):
+                candidates.append(record)
+        training = {
+            record["run_id"]: record
+            for record in candidates
+            if record["evaluation_scope"] == "validation"
+        }
+        records = [
+            record
+            for record in candidates
+            if (record["evaluation_scope"] == "validation" and record["modality"] == "metadata")
+            or _has_matching_training_parent(record, training)
+        ]
+        records.sort(
+            key=lambda item: (
+                item["experiment_name"],
+                item["model"],
+                item["evaluation_scope"],
+                item["run_id"],
+            )
         )
-    )
-    table = pd.DataFrame.from_records(records, columns=COMPARISON_COLUMNS)
-    output = Path(output_directory)
-    output.mkdir(parents=True, exist_ok=True)
-    csv_path = output / "model_comparison_table.csv"
-    markdown_path = output / "model_comparison_table.md"
-    _atomic_write_csv(table, csv_path)
-    _atomic_write_text(
-        markdown_path,
-        "# Experiment comparison\n\n"
-        + ("No completed runs are available.\n" if table.empty else _markdown_table(table)),
-    )
+        table = pd.DataFrame.from_records(records, columns=COMPARISON_COLUMNS)
+        output = Path(output_directory)
+        output.mkdir(parents=True, exist_ok=True)
+        csv_path = output / "model_comparison_table.csv"
+        markdown_path = output / "model_comparison_table.md"
+        _atomic_write_csv(table, csv_path)
+        _atomic_write_text(
+            markdown_path,
+            "# Experiment comparison\n\n"
+            + ("No completed runs are available.\n" if table.empty else _markdown_table(table)),
+        )
     return csv_path, markdown_path, len(table)
 
 
@@ -272,12 +281,14 @@ def _parser() -> argparse.ArgumentParser:
         help="MLflow SQLite tracking URI",
     )
     parser.add_argument("--output-directory", type=Path, default=Path("reports"))
+    add_logging_argument(parser)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Regenerate both comparison views and print their row count."""
     args = _parser().parse_args(argv)
+    configure_logging(args.log_level)
     try:
         csv_path, markdown_path, rows = regenerate_comparison(
             tracking_uri=args.tracking_uri,

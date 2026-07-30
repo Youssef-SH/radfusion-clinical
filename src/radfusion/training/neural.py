@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol, cast
@@ -89,6 +90,13 @@ class ImageLoaders:
 
     train: DataLoader[Any]
     validation: DataLoader[Any]
+
+
+EpochCallback = Callable[[EpochRecord], None]
+EpochStartedCallback = Callable[[str, int, int], None]
+StageCallback = Callable[[str, int], None]
+BatchProgressCallback = Callable[[int, int], None]
+NeuralProgressCallback = Callable[[str, str, int, int, int], None]
 
 
 def seed_neural_runtime(seed: int) -> None:
@@ -212,6 +220,7 @@ def train_one_epoch(
     gradient_clip_norm: float,
     warmup: bool,
     scaler: torch.amp.GradScaler | None = None,
+    progress_callback: BatchProgressCallback | None = None,
 ) -> float:
     """Train one epoch and return finite sample-weighted mean loss."""
     model.train()
@@ -220,7 +229,8 @@ def train_one_epoch(
     total_loss = 0.0
     total_samples = 0
     effective_scaler = scaler if runtime.mixed_precision_effective else None
-    for batch in loader:
+    total_batches = _progress_total(loader) if progress_callback is not None else None
+    for completed_batches, batch in enumerate(loader, start=1):
         images, targets = _device_batch(batch, runtime)
         optimizer.zero_grad(set_to_none=True)
         context = (
@@ -247,6 +257,8 @@ def train_one_epoch(
         batch_size = len(targets)
         total_loss += float(loss.detach().cpu()) * batch_size
         total_samples += batch_size
+        if total_batches is not None:
+            _best_effort_callback(progress_callback, completed_batches, total_batches)
     if total_samples == 0:
         raise NeuralTrainingError("Training DataLoader produced no samples")
     mean_loss = total_loss / total_samples
@@ -260,6 +272,7 @@ def deterministic_inference(
     loader: DataLoader[Any],
     *,
     runtime: ResolvedDevice,
+    progress_callback: BatchProgressCallback | None = None,
 ) -> InferenceResult:
     """Run one ordered inference pass and calculate finite validation AP."""
     model.eval()
@@ -268,7 +281,8 @@ def deterministic_inference(
     sample_ids: list[str] = []
     patient_ids: list[str] = []
     with torch.inference_mode():
-        for batch in loader:
+        total_batches = _progress_total(loader) if progress_callback is not None else None
+        for completed_batches, batch in enumerate(loader, start=1):
             images, batch_targets = _device_batch(batch, runtime)
             context = (
                 torch.autocast(device_type="cuda", dtype=torch.float16)
@@ -282,6 +296,8 @@ def deterministic_inference(
             logits.append(batch_logits.detach().float().cpu().numpy())
             sample_ids.extend(str(value) for value in batch["sample_id"])
             patient_ids.extend(str(value) for value in batch["patient_id"])
+            if total_batches is not None:
+                _best_effort_callback(progress_callback, completed_batches, total_batches)
     if not targets:
         raise NeuralTrainingError("Evaluation DataLoader produced no samples")
     target_array = np.concatenate(targets)
@@ -326,6 +342,10 @@ def fit_image_model(
     config: ImageConfig,
     runtime: ResolvedDevice,
     pos_weight: float,
+    epoch_callback: EpochCallback | None = None,
+    epoch_started_callback: EpochStartedCallback | None = None,
+    stage_callback: StageCallback | None = None,
+    progress_callback: NeuralProgressCallback | None = None,
 ) -> NeuralFitResult:
     """Run head warm-up and full fine-tuning with validation checkpoint selection."""
     neural_model = _validated_neural_model(model)
@@ -345,6 +365,7 @@ def fit_image_model(
     global_epoch = 0
 
     neural_model.freeze_encoder()
+    _best_effort_callback(stage_callback, "warmup", config.warmup_epochs)
     warmup_optimizer = AdamW(
         classifier.parameters(),
         lr=config.warmup_head_learning_rate,
@@ -352,6 +373,7 @@ def fit_image_model(
     )
     for stage_epoch in range(1, config.warmup_epochs + 1):
         global_epoch += 1
+        _best_effort_callback(epoch_started_callback, "warmup", global_epoch, stage_epoch)
         loss = train_one_epoch(
             neural_model,
             loaders.train,
@@ -361,8 +383,18 @@ def fit_image_model(
             gradient_clip_norm=config.gradient_clip_norm,
             warmup=True,
             scaler=scaler,
+            progress_callback=_operation_callback(
+                progress_callback, "training", "warmup", global_epoch
+            ),
         )
-        validation = deterministic_inference(model, loaders.validation, runtime=runtime)
+        validation = deterministic_inference(
+            model,
+            loaders.validation,
+            runtime=runtime,
+            progress_callback=_operation_callback(
+                progress_callback, "validation", "warmup", global_epoch
+            ),
+        )
         selected = candidate_is_improvement(
             validation.average_precision,
             best_ap,
@@ -373,22 +405,23 @@ def fit_image_model(
             best_state = copy_state_dict_to_cpu(model)
             selected_epoch = global_epoch
             selected_stage = "warmup"
-        history.append(
-            EpochRecord(
-                global_epoch,
-                stage_epoch,
-                "warmup",
-                loss,
-                validation.average_precision,
-                selected,
-                None,
-                float(warmup_optimizer.param_groups[0]["lr"]),
-                None,
-                0,
-            )
+        record = EpochRecord(
+            global_epoch,
+            stage_epoch,
+            "warmup",
+            loss,
+            validation.average_precision,
+            selected,
+            None,
+            float(warmup_optimizer.param_groups[0]["lr"]),
+            None,
+            0,
         )
+        history.append(record)
+        _best_effort_callback(epoch_callback, record)
 
     neural_model.unfreeze_encoder()
+    _best_effort_callback(stage_callback, "fine_tune", config.fine_tune_epochs)
     fine_optimizer = AdamW(
         [
             {
@@ -414,6 +447,7 @@ def fit_image_model(
     no_improvement = 0
     for stage_epoch in range(1, config.fine_tune_epochs + 1):
         global_epoch += 1
+        _best_effort_callback(epoch_started_callback, "fine_tune", global_epoch, stage_epoch)
         encoder_learning_rate_used = float(fine_optimizer.param_groups[0]["lr"])
         head_learning_rate_used = float(fine_optimizer.param_groups[1]["lr"])
         loss = train_one_epoch(
@@ -425,8 +459,18 @@ def fit_image_model(
             gradient_clip_norm=config.gradient_clip_norm,
             warmup=False,
             scaler=scaler,
+            progress_callback=_operation_callback(
+                progress_callback, "training", "fine_tune", global_epoch
+            ),
         )
-        validation = deterministic_inference(model, loaders.validation, runtime=runtime)
+        validation = deterministic_inference(
+            model,
+            loaders.validation,
+            runtime=runtime,
+            progress_callback=_operation_callback(
+                progress_callback, "validation", "fine_tune", global_epoch
+            ),
+        )
         selected = candidate_is_improvement(
             validation.average_precision,
             best_ap,
@@ -441,20 +485,20 @@ def fit_image_model(
         else:
             no_improvement += 1
         scheduler.step(validation.average_precision)
-        history.append(
-            EpochRecord(
-                global_epoch,
-                stage_epoch,
-                "fine_tune",
-                loss,
-                validation.average_precision,
-                selected,
-                encoder_learning_rate_used,
-                head_learning_rate_used,
-                scheduler.last_epoch,
-                no_improvement,
-            )
+        record = EpochRecord(
+            global_epoch,
+            stage_epoch,
+            "fine_tune",
+            loss,
+            validation.average_precision,
+            selected,
+            encoder_learning_rate_used,
+            head_learning_rate_used,
+            scheduler.last_epoch,
+            no_improvement,
         )
+        history.append(record)
+        _best_effort_callback(epoch_callback, record)
         if not selected and no_improvement >= config.early_stopping_patience:
             break
     if best_state is None or selected_stage not in {"warmup", "fine_tune"}:
@@ -489,6 +533,38 @@ def _device_batch(
         images.to(runtime.device, non_blocking=non_blocking),
         targets.to(runtime.device, non_blocking=non_blocking),
     )
+
+
+def _operation_callback(
+    callback: NeuralProgressCallback | None,
+    operation: str,
+    stage: str,
+    global_epoch: int,
+) -> BatchProgressCallback | None:
+    if callback is None:
+        return None
+
+    def report(completed: int, total: int) -> None:
+        _best_effort_callback(callback, operation, stage, global_epoch, completed, total)
+
+    return report
+
+
+def _best_effort_callback(callback: Callable[..., None] | None, *args: object) -> None:
+    if callback is None:
+        return
+    try:
+        callback(*args)
+    except Exception:
+        return
+
+
+def _progress_total(loader: object) -> int | None:
+    try:
+        total = len(cast(Any, loader))
+    except Exception:
+        return None
+    return total if isinstance(total, int) and not isinstance(total, bool) and total > 0 else None
 
 
 def _require_finite_logits(logits: object, batch_size: int) -> None:

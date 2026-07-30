@@ -15,6 +15,12 @@ import pyarrow.parquet as pq
 from radfusion.data.rsna_artifacts import load_current_bundle
 from radfusion.data.rsna_source import RSNA_CLASS_VALUES, ManifestBuildError
 from radfusion.data.splitting import SPLIT_NAMES
+from radfusion.utils.operational_logging import (
+    add_logging_argument,
+    configure_logging,
+    get_operational_logger,
+    timed_phase,
+)
 from radfusion.utils.privacy import validate_public_reports
 from radfusion.utils.publication import publish_directory, staging_directory
 
@@ -31,6 +37,7 @@ REPORT_FILENAMES = (
     "missingness_report.md",
 )
 _AGE_LABELS = ("<18", "18-<40", "40-<60", "60-<80", "80-120", ">120")
+_LOGGER = get_operational_logger(__name__)
 
 
 def generate_rsna_audit(
@@ -38,12 +45,21 @@ def generate_rsna_audit(
     output_directory: str | Path = "reports/rsna/audit",
 ) -> dict[str, object]:
     """Generate deterministic aggregate reports for the current RSNA bundle."""
-    bundle = load_current_bundle(manifest_directory)
-    samples = pq.read_table(bundle.samples_path)
-    labels = pq.read_table(bundle.labels_path)
-    annotations = pq.read_table(bundle.annotations_path)
-    splits = pq.read_table(bundle.splits_path)
-    metadata = json.loads(bundle.metadata_path.read_text(encoding="utf-8"))
+    with timed_phase(_LOGGER, "audit_generation"):
+        return _generate_rsna_audit(manifest_directory, output_directory)
+
+
+def _generate_rsna_audit(
+    manifest_directory: str | Path,
+    output_directory: str | Path,
+) -> dict[str, object]:
+    with timed_phase(_LOGGER, "audit_bundle_loading"):
+        bundle = load_current_bundle(manifest_directory)
+        samples = pq.read_table(bundle.samples_path)
+        labels = pq.read_table(bundle.labels_path)
+        annotations = pq.read_table(bundle.annotations_path)
+        splits = pq.read_table(bundle.splits_path)
+        metadata = json.loads(bundle.metadata_path.read_text(encoding="utf-8"))
 
     sample_frame = samples.to_pandas()
     label_frame = labels.to_pandas()
@@ -331,12 +347,14 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("reports/rsna/audit"),
         help="Root directory for bundle-specific audit reports",
     )
+    add_logging_argument(parser)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Generate reports and print their bundle lineage."""
     args = _parser().parse_args(argv)
+    configure_logging(args.log_level)
     try:
         summary = generate_rsna_audit(args.manifest_directory, args.output_directory)
     except (ManifestBuildError, OSError, ValueError, KeyError) as exc:

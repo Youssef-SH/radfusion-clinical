@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import subprocess
@@ -21,12 +22,14 @@ import skops
 from mlflow.tracking import MlflowClient
 
 from radfusion.data.hashing import sha256_file
+from radfusion.utils.operational_logging import get_operational_logger, log_event
 
 if TYPE_CHECKING:
     from radfusion.training.config import ExperimentConfig
 
 DEFAULT_TRACKING_URI = "sqlite:///mlflow.db"
 MLFLOW_ARTIFACT_DIRECTORY = "mlartifacts"
+_LOGGER = get_operational_logger(__name__)
 
 
 def configure_mlflow(
@@ -67,10 +70,35 @@ def tracked_run(
     parameters: dict[str, Any],
 ) -> Iterator[str]:
     """Start an MLflow run and log normalized tags and parameters."""
-    with mlflow.start_run(run_name=run_name, tags=tags) as run:
-        mlflow.set_tag("run_date", datetime.now(UTC).date().isoformat())
-        mlflow.log_params({key: _parameter_value(value) for key, value in parameters.items()})
-        yield run.info.run_id
+    context: dict[str, object] | None = None
+    try:
+        with mlflow.start_run(run_name=run_name, tags=tags) as run:
+            seed = tags.get("seed")
+            context = {
+                "run_id": run.info.run_id,
+                "run_kind": tags.get("run_kind", "unknown"),
+                "experiment": tags.get("experiment_name", run_name),
+                "dataset": tags.get("dataset", "unknown"),
+                "model": tags.get("model", "unknown"),
+                "seed": _operational_seed(seed),
+            }
+            log_event(_LOGGER, "run_started", **context)
+            mlflow.set_tag("run_date", datetime.now(UTC).date().isoformat())
+            mlflow.log_params({key: _parameter_value(value) for key, value in parameters.items()})
+            yield run.info.run_id
+    except BaseException as exc:
+        if context is not None:
+            log_event(
+                _LOGGER,
+                "run_failed",
+                level=logging.ERROR,
+                error_type=type(exc).__name__,
+                **context,
+            )
+        raise
+    else:
+        if context is not None:
+            log_event(_LOGGER, "run_finished", **context)
 
 
 def git_revision() -> tuple[str, bool]:
@@ -90,6 +118,15 @@ def git_revision() -> tuple[str, bool]:
         ).stdout.strip()
     )
     return commit, dirty
+
+
+def _operational_seed(value: object) -> int | None:
+    try:
+        if not isinstance(value, str) or not value.isascii() or not value.isdecimal():
+            return None
+        return int(value)
+    except Exception:
+        return None
 
 
 def uv_lock_sha256(path: str | Path = "uv.lock") -> str:

@@ -73,8 +73,10 @@ from radfusion.data.splitting import (
     split_assignment_id,
     validate_split_table,
 )
+from radfusion.utils.operational_logging import CountProgress, get_operational_logger
 
 DATASET_VERSION = "rsna-pneumonia-detection-challenge-stage-2"
+_LOGGER = get_operational_logger(__name__)
 SAMPLES_FILENAME = "rsna_samples.parquet"
 LABELS_FILENAME = "rsna_labels.parquet"
 ANNOTATIONS_FILENAME = "rsna_annotations.parquet"
@@ -199,8 +201,19 @@ def build_rsna_artifacts(
     source_inventory_records: list[SourceInventoryRecord] = []
     dimensions: dict[str, tuple[int, int]] = {}
     audit = AuditAccumulator.empty()
+    source_count = len(source_samples)
+    progress = (
+        CountProgress(
+            _LOGGER,
+            "manifest_construction_progress",
+            total=source_count,
+            unit="dicom_files",
+        )
+        if source_count > 0
+        else None
+    )
 
-    for source_id in sorted(source_samples):
+    for completed, source_id in enumerate(sorted(source_samples), start=1):
         source = source_samples[source_id]
         relative_image_path = canonical_image_path(source_id)
         image_path = resolve_image_path(paths.root, relative_image_path)
@@ -254,6 +267,8 @@ def build_rsna_artifacts(
                 dimensions[sample_id],
             )
         )
+        if progress is not None:
+            progress.update(completed)
 
     samples = pa.Table.from_pylist(
         [asdict(record) for record in sample_records], RSNA_SAMPLE_SCHEMA

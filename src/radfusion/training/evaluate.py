@@ -40,9 +40,18 @@ from radfusion.utils.mlflow_utils import (
     uv_lock_sha256,
 )
 from radfusion.utils.model_publication import threshold_contract, validate_published_model
+from radfusion.utils.operational_logging import (
+    add_logging_argument,
+    configure_logging,
+    get_operational_logger,
+    log_event,
+    timed_phase,
+)
 from radfusion.utils.privacy import validate_public_reports
 from radfusion.utils.publication import publish_directory, staging_directory
 from radfusion.utils.skops_io import load_skops
+
+_LOGGER = get_operational_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -88,6 +97,7 @@ def evaluate_training_run(
         evaluator_lock_hash=evaluator_lock_hash,
     )
     model = validate_metadata_pipeline(load_skops(model_path))
+    log_event(_LOGGER, "training_package_verified", training_run_id=training_run_id)
     dataset_implementation = get_dataset(config.dataset.registry_key)
     pinned_lineage = dataset_implementation.load_lineage(config.dataset)
     if (
@@ -133,41 +143,44 @@ def evaluate_training_run(
             "best_iteration": best_iteration,
         },
     ) as evaluation_run_id:
-        test, lineage = dataset_implementation.load_test(config.dataset)
+        context = {"run_id": evaluation_run_id, "model": config.model.registry_key}
+        with timed_phase(_LOGGER, "test_dataset_loading", **context):
+            test, lineage = dataset_implementation.load_test(config.dataset)
         if (
             lineage.bundle_id != manifest["bundle_id"]
             or lineage.split_assignment_id != manifest["split_assignment_id"]
             or lineage.task_id != manifest["task"]
         ):
             raise ValueError("Test bundle lineage differs from the trained model")
-        probabilities = positive_class_probabilities(
-            model,
-            test.features,
-            best_iteration=best_iteration,
-        )
-        thresholds = {key: float(value) for key, value in manifest["thresholds"].items()}
-        probability_metrics = evaluate_probabilities(
-            test.targets,
-            probabilities,
-            calibration_bins=config.evaluation.calibration_bins,
-        )
-        youden = evaluate_operating_point(
-            test.targets,
-            probabilities,
-            threshold=thresholds["youden_j"],
-        )
-        target_sensitivity = evaluate_operating_point(
-            test.targets,
-            probabilities,
-            threshold=thresholds["target_sensitivity"],
-        )
-        latency_ms = benchmark_single_sample_latency_ms(
-            model,
-            test.features,
-            warmup_calls=config.evaluation.latency_warmup_calls,
-            measured_calls=config.evaluation.latency_measured_calls,
-            best_iteration=best_iteration,
-        )
+        with timed_phase(_LOGGER, "test_evaluation", **context):
+            probabilities = positive_class_probabilities(
+                model,
+                test.features,
+                best_iteration=best_iteration,
+            )
+            thresholds = {key: float(value) for key, value in manifest["thresholds"].items()}
+            probability_metrics = evaluate_probabilities(
+                test.targets,
+                probabilities,
+                calibration_bins=config.evaluation.calibration_bins,
+            )
+            youden = evaluate_operating_point(
+                test.targets,
+                probabilities,
+                threshold=thresholds["youden_j"],
+            )
+            target_sensitivity = evaluate_operating_point(
+                test.targets,
+                probabilities,
+                threshold=thresholds["target_sensitivity"],
+            )
+            latency_ms = benchmark_single_sample_latency_ms(
+                model,
+                test.features,
+                warmup_calls=config.evaluation.latency_warmup_calls,
+                measured_calls=config.evaluation.latency_measured_calls,
+                best_iteration=best_iteration,
+            )
         document = metrics_document(
             scope="test",
             calibration_bins=config.evaluation.calibration_bins,
@@ -217,6 +230,7 @@ def evaluate_training_run(
         finally:
             if report_stage.exists():
                 shutil.rmtree(report_stage)
+        log_event(_LOGGER, "publication_completed", artifact="test_report", **context)
     return TestEvaluationResult(
         run_id=evaluation_run_id,
         training_run_id=training_run_id,
@@ -329,12 +343,14 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_TRACKING_URI,
         help="MLflow SQLite tracking URI",
     )
+    add_logging_argument(parser)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Evaluate one training run and print aggregate test lineage."""
     args = _parser().parse_args(argv)
+    configure_logging(args.log_level)
     try:
         result = evaluate_training_run(
             args.run_id,

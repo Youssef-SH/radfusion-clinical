@@ -40,6 +40,7 @@ from radfusion.utils.mlflow_utils import (
     uv_lock_sha256,
 )
 from radfusion.utils.model_publication import publish_model_run, threshold_contract
+from radfusion.utils.operational_logging import get_operational_logger, log_event, timed_phase
 from radfusion.utils.privacy import validate_public_reports
 from radfusion.utils.publication import publish_directory, staging_directory
 from radfusion.utils.skops_io import load_skops, save_skops
@@ -56,6 +57,7 @@ REQUIRED_REPORT_FILENAMES = frozenset(
         "confusion_matrix_target_sensitivity.png",
     }
 )
+_LOGGER = get_operational_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -119,56 +121,75 @@ def train_configured_experiment(
         parameters=base_parameters,
     ) as run_id:
         log_source_config(config)
-        dataset = get_dataset(config.dataset.registry_key).load_train_validation(config.dataset)
+        context = {"run_id": run_id, "model": config.model.registry_key}
+        with timed_phase(_LOGGER, "dataset_loading", **context):
+            dataset = get_dataset(config.dataset.registry_key).load_train_validation(config.dataset)
+        log_event(
+            _LOGGER,
+            "dataset_loaded",
+            train_count=len(dataset.train.targets),
+            validation_count=len(dataset.validation.targets),
+            **context,
+        )
         mlflow.set_tags(
             {
                 "split_assignment_id": dataset.lineage.split_assignment_id,
                 "label_policy_version": dataset.lineage.label_policy_version,
             }
         )
-        model_fit = get_model(config.model.registry_key).fit(
-            config.model,
-            config.training.seed,
-            dataset.train.features,
-            dataset.train.targets,
-            dataset.validation.features,
-            dataset.validation.targets,
-        )
+        with timed_phase(_LOGGER, "model_fitting", **context):
+            model_fit = get_model(config.model.registry_key).fit(
+                config.model,
+                config.training.seed,
+                dataset.train.features,
+                dataset.train.targets,
+                dataset.validation.features,
+                dataset.validation.targets,
+            )
         best_iteration = _best_iteration(model_fit.derived_parameters)
-        probabilities = positive_class_probabilities(
-            model_fit.pipeline,
-            dataset.validation.features,
-            best_iteration=best_iteration,
-        )
-        thresholds = {
-            "youden_j": youden_j_threshold(dataset.validation.targets, probabilities),
-            "target_sensitivity": target_sensitivity_threshold(
+        with timed_phase(_LOGGER, "validation_evaluation", **context):
+            probabilities = positive_class_probabilities(
+                model_fit.pipeline,
+                dataset.validation.features,
+                best_iteration=best_iteration,
+            )
+            thresholds = {
+                "youden_j": youden_j_threshold(dataset.validation.targets, probabilities),
+                "target_sensitivity": target_sensitivity_threshold(
+                    dataset.validation.targets,
+                    probabilities,
+                    sensitivity=config.evaluation.sensitivity_target,
+                ),
+            }
+            probability_metrics = evaluate_probabilities(
                 dataset.validation.targets,
                 probabilities,
-                sensitivity=config.evaluation.sensitivity_target,
-            ),
-        }
-        probability_metrics = evaluate_probabilities(
-            dataset.validation.targets,
-            probabilities,
-            calibration_bins=config.evaluation.calibration_bins,
-        )
-        youden_metrics = evaluate_operating_point(
-            dataset.validation.targets,
-            probabilities,
-            threshold=thresholds["youden_j"],
-        )
-        sensitivity_metrics = evaluate_operating_point(
-            dataset.validation.targets,
-            probabilities,
-            threshold=thresholds["target_sensitivity"],
-        )
-        latency_ms = benchmark_single_sample_latency_ms(
-            model_fit.pipeline,
-            dataset.validation.features,
-            warmup_calls=config.evaluation.latency_warmup_calls,
-            measured_calls=config.evaluation.latency_measured_calls,
-            best_iteration=best_iteration,
+                calibration_bins=config.evaluation.calibration_bins,
+            )
+            youden_metrics = evaluate_operating_point(
+                dataset.validation.targets,
+                probabilities,
+                threshold=thresholds["youden_j"],
+            )
+            sensitivity_metrics = evaluate_operating_point(
+                dataset.validation.targets,
+                probabilities,
+                threshold=thresholds["target_sensitivity"],
+            )
+            latency_ms = benchmark_single_sample_latency_ms(
+                model_fit.pipeline,
+                dataset.validation.features,
+                warmup_calls=config.evaluation.latency_warmup_calls,
+                measured_calls=config.evaluation.latency_measured_calls,
+                best_iteration=best_iteration,
+            )
+        log_event(
+            _LOGGER,
+            "validation_completed",
+            average_precision=probability_metrics.average_precision,
+            roc_auc=probability_metrics.roc_auc,
+            brier_score=probability_metrics.brier_score,
+            **context,
         )
         document = metrics_document(
             scope="validation",
@@ -266,6 +287,8 @@ def train_configured_experiment(
             if report_stage.exists():
                 shutil.rmtree(report_stage)
             shutil.rmtree(temporary_model_root, ignore_errors=True)
+        log_event(_LOGGER, "publication_completed", artifact="model_package", **context)
+        log_event(_LOGGER, "publication_completed", artifact="validation_report", **context)
 
     return ModelResult(
         model_name=config.model.registry_key,
